@@ -4,6 +4,7 @@ min_version = "2026.9.1"
 experimental = true
 
 [tools]
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:dahlia/hongdown" = "0.5.3"
 "aqua:rhysd/actionlint" = "1.7.12"
 "aqua:zizmorcore/zizmor" = "1.30.0"
@@ -67,8 +68,18 @@ wait_for = ["test"]
 env = { RUSTDOCFLAGS = "-D warnings" }
 run = "cargo doc --workspace --no-deps --document-private-items --locked"
 
+# Dependency audit ------------------------------------------------------------
+
+# The policy lives in deny.toml.  This task is part of the gate but not of
+# `check`: the advisories check clones the RustSec advisory database, so it
+# needs the network and is not fast static verification.  `--locked` makes
+# cargo-deny refuse to touch Cargo.lock, matching every other cargo task here.
+[tasks.deny]
+description = "Audit dependency advisories, licenses, bans, and sources"
+run = "cargo-deny --locked check"
+
 # The gate --------------------------------------------------------------------
 
 [tasks.ci]
 description = "Complete verification gate; must match continuous integration"
-depends = ["check", "build", "test", "doc"]
+depends = ["check", "build", "test", "doc", "deny"]

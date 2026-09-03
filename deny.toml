@@ -1,0 +1,109 @@
+# cargo-deny configuration for Coffer.
+#
+# `mise run deny` runs `cargo-deny --locked check`, which evaluates every
+# section below against the locked dependency graph.  The check is part of
+# `mise run ci` but deliberately not part of `mise run check`: the advisories
+# check clones the RustSec advisory database, so it needs the network and does
+# not qualify as fast static verification.
+#
+# The policy is written for a GPL-3.0-or-later project that implements private
+# protocols with a reference-only boundary (see CONTRIBUTING.md, "License and
+# source provenance").  Every list is an allow list: a license, registry, or
+# git source that is not named here fails the gate, so adding a dependency
+# whose terms are not already covered forces a review of this file.
+#
+# Field semantics follow the cargo-deny 0.20 documentation:
+# https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Audit the graph with every feature enabled so that a dependency reachable
+# only through an optional feature is checked before anyone turns that feature
+# on.  This matters for a project that must not accidentally enable remote
+# fallbacks such as third-party anisette servers.
+all-features = true
+
+[advisories]
+# Opt into the current advisory semantics, in which every vulnerability,
+# unsound, and notice advisory is an error unless listed in `ignore`.
+version = 2
+# A yanked crate version was withdrawn by its publisher, usually because it is
+# broken or insecure.  Treat it as an error rather than the default warning.
+yanked = "deny"
+# Fail on unmaintained advisories for direct dependencies, which the project
+# chose and can replace.  Unmaintained transitive crates are an upstream
+# problem; they surface through `cargo deny list` and dependency review rather
+# than by blocking every build.
+unmaintained = "workspace"
+# An `ignore` entry that no longer matches any crate is stale policy.  Fail so
+# that the exception is removed instead of silently outliving its reason.
+unused-ignored-advisory = "deny"
+# No advisories are ignored.  Each future entry must carry a `reason`.
+ignore = []
+
+[licenses]
+# Opt into the current license semantics, in which every license is denied
+# unless it appears in `allow`.
+version = 2
+# Reject a license text that askalono cannot identify with high confidence.
+# The default is 0.8; a stricter threshold makes an ambiguous or edited license
+# file a review item instead of a silent match.
+confidence-threshold = 0.93
+# Check dev-dependencies too.  They are not distributed with Coffer, but the
+# reference-only boundary applies to everything contributors run and read.
+include-dev = true
+# Most entries in `allow` are unused while the dependency graph is empty.
+# Warning about each of them would only add noise to every gate run.
+unused-allowed-license = "allow"
+# Licenses whose terms are compatible with GPL-3.0-or-later distribution.
+# cargo-deny treats GNU licenses pedantically, so the project's own license
+# must appear exactly as declared in Cargo.toml.  SSPL and other source-
+# available licenses are deliberately absent; the code under them is
+# reference-only for this project.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "GPL-3.0-or-later",
+    "ISC",
+    "MIT",
+    # SideStore's apple-private-apis, an intended future dependency.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# Workspace crates are `publish = false`, but their license expression is still
+# checked so that a crate whose `license` drifts from GPL-3.0-or-later fails.
+ignore = false
+
+[bans]
+# Duplicate versions of a crate inflate the audit surface but are usually an
+# upstream artifact.  Warn so that they are visible without blocking the gate.
+multiple-versions = "warn"
+# A wildcard version requirement resolves to whatever is newest, which defeats
+# review of the locked graph.
+wildcards = "deny"
+# Cargo reports a `path` dependency without a `version` as the requirement `*`.
+# Exempt such dependencies in unpublished crates so that a workspace crate can
+# depend on a sibling by path alone.  Every workspace crate is `publish =
+# false`, and registry and git wildcards remain denied.
+allow-wildcard-paths = true
+# When `-g` renders a duplicate-version graph, highlight both the lowest
+# version and the simplest path to it.
+highlight = "all"
+
+[sources]
+# Only the registry and git sources listed below are acceptable.
+unknown-registry = "deny"
+unknown-git = "deny"
+# A git dependency must pin a commit.  A branch or tag can move, which would
+# let a `cargo update` pull unreviewed code into a security-sensitive build.
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git sources yet.  When the roadmap reaches Apple Account authentication,
+# SideStore's apple-private-apis repository is expected to be the first entry.
+allow-git = []
+# crates.io is unused while the dependency graph is empty; do not warn about it.
+unused-allowed-source = "allow"
