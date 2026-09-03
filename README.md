@@ -148,7 +148,7 @@ Coffer
     │   └── apple-private-apis
     │       ├── icloud-auth
     │       └── omnisette
-    ├── CloudKit / CKCode
+    ├── CloudKit/CKCode
     ├── Octagon
     └── CKKS
 ~~~~
@@ -156,6 +156,11 @@ Coffer
 The protocol and synchronization layers must remain independent of GTK. A
 command-line or test harness should be able to exercise them without starting a
 graphical session.
+
+The workspace currently contains a single crate, `coffer-protocol` under
+*crates/*, which is the Apple protocol layer. The remaining layers will be added
+as separate crates that depend on it, and only the GNOME application crate will
+depend on GTK and libadwaita.
 
 Likewise, browser integration must consume a narrow application-facing
 interface rather than directly accessing decrypted keychain internals.
@@ -192,6 +197,11 @@ Before considering a change complete, run the full verification gate:
 ~~~~ sh
 mise run ci
 ~~~~
+
+`mise run ci` runs every canonical verification task, including `fmt-check`,
+`build`, `doc`, and the dependency audit `deny`; it checks formatting but never
+rewrites files. Continuous integration runs the same task. Run `mise tasks` for
+the complete list.
 
 The Rust toolchain, including `rustfmt`, Clippy, and rust-analyzer, is pinned in
 *mise.toml*. The repository treats Rust and Clippy warnings as errors.

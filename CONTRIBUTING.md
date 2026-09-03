@@ -4,7 +4,7 @@ Contributing guide
 Thank you for contributing to Coffer.
 
 This document is also the operating guide for coding agents working in this
-repository. *AGENTS.md* and *CLAUDE.md* may point here directly.
+repository. *AGENTS.md* and *CLAUDE.md* are symbolic links to this file.
 
 Before changing code, read:
 
@@ -46,14 +46,17 @@ The Rust toolchain configured in *mise.toml* must include:
  -  `rustfmt`; and
  -  Clippy.
 
-Auxiliary tools, including [Hongdown], must likewise be managed through mise
-where practical.
+Auxiliary tools, including [Hongdown], [cargo-deny], [actionlint], and
+[zizmor], must likewise be managed through mise where practical.
 
 Avoid introducing ad hoc setup commands when the operation should instead be a
 reproducible mise task.
 
 [mise]: https://mise.jdx.dev/
 [Hongdown]: https://github.com/dahlia/hongdown
+[cargo-deny]: https://github.com/EmbarkStudios/cargo-deny
+[actionlint]: https://github.com/rhysd/actionlint
+[zizmor]: https://github.com/zizmorcore/zizmor
 
 
 Canonical development tasks
@@ -94,11 +97,20 @@ Run fast static verification suitable for frequent use and pre-commit checks.
 
 This should include:
 
- -  `cargo check` for the entire workspace and all relevant targets;
- -  Clippy for the entire workspace and all relevant targets;
+ -  Clippy for the entire workspace and all relevant targets, which runs the
+    full compiler front end and therefore subsumes `cargo check`;
  -  `rustfmt` verification;
- -  Hongdown verification; and
+ -  Hongdown verification;
+ -  mise configuration formatting verification;
+ -  GitHub Actions workflow linting; and
  -  checks for other project-owned languages when they are introduced.
+
+Checks that need the network, such as the dependency audit, do not belong here.
+
+### `mise run build`
+
+Build every workspace target, including tests, examples, and benchmarks,
+without running them.
 
 ### `mise run test`
 
@@ -113,12 +125,26 @@ Build Rust API documentation with warnings denied.
 
 Public Rust APIs are expected to remain useful and reviewable through rustdoc.
 
+### `mise run deny`
+
+Audit the dependency graph with cargo-deny against *deny.toml*: security
+advisories, license policy, banned crates, and permitted sources.
+
+This task fetches the RustSec advisory database and therefore needs network
+access.
+
 ### `mise run ci`
 
 Run the complete local verification gate expected to match continuous
-integration.
+integration. It runs `check`, `build`, `test`, `doc`, and `deny`; continuous
+integration runs exactly this task and nothing else.
 
 A change is not complete until `mise run ci` succeeds.
+
+Every Cargo invocation in the gate that resolves dependencies passes
+`--locked`. When a change to a *Cargo.toml* requires a lockfile update, update
+*Cargo.lock* deliberately with `cargo update` or `cargo add` and review the
+result before running the gate.
 
 If one of these tasks is absent while bootstrapping the repository, add the task
 instead of bypassing the intended interface.
@@ -139,7 +165,19 @@ warnings = "deny"
 all = "deny"
 ~~~~
 
-Workspace crates must inherit the workspace lint configuration.
+The workspace additionally denies missing documentation on public items,
+denies `unsafe` code unless it is allowed in a narrow scope, and requires every
+`unsafe` block to carry a `SAFETY:` comment through Clippy's
+`undocumented_unsafe_blocks` lint. The `coffer-protocol` crate goes further and
+forbids `unsafe` at the crate level; if FFI ever has to live there, relax that
+attribute to `deny` deliberately before adding a scoped allowance.
+
+Workspace crates must inherit the workspace lint configuration with
+`[lints] workspace = true`. The Clippy task also passes `-D warnings` on the
+command line, but that only backs up ordinary warnings and Clippy's `all`
+group; the documentation and `unsafe` lints are allow-by-default and reach a
+crate solely through inheritance. Check the manifest of every new crate for
+the inherit line.
 
 Do not weaken a lint globally to make a change pass. If a lint must be allowed,
 scope the exception as narrowly as possible and document why the code is safer
@@ -180,7 +218,14 @@ implicit.
 
 Keep protocol crates independent of GTK. Authentication, CloudKit, Octagon,
 CKKS, encrypted storage, and synchronization must be testable without a
-graphical session.
+graphical session. The Apple protocol layer lives in the `coffer-protocol`
+crate under *crates/*; higher layers will be added as separate crates that
+depend on it, and only the GNOME application crate may depend on GTK or
+libadwaita.
+
+Start every new Rust source file with the GPL notice block used in
+*crates/coffer-protocol/src/lib.rs*. That per-file notice is where the
+“or any later version” election of the project license is recorded.
 
 Avoid introducing a new cryptographic implementation when a well-reviewed Rust
 crate already provides the required primitive. Protocol-specific composition is
@@ -315,6 +360,10 @@ rate-limited, trust-mutating, recovery-sensitive, or keychain-mutating.
 
 Do not commit captured real credentials even when they belong to a contributor.
 
+Keep fixtures next to the crate whose tests consume them, in a
+*tests/fixtures/* directory inside that crate, and record where each fixture
+came from and how it was sanitized in a *README.md* in that directory.
+
 
 Dependency policy
 -----------------
@@ -332,6 +381,15 @@ Keep the dependency surface deliberate, especially for crates involved in:
 Disable unnecessary default features where doing so reduces networking,
 platform assumptions, or attack surface.
 
+Dependencies are audited with cargo-deny against *deny.toml*, which is part of
+the canonical gate through `mise run deny`. The policy allows GPL-3.0-or-later
+itself, the permissive licenses commonly found in the Rust ecosystem, and
+MPL-2.0, which covers `apple-private-apis`; any other license fails the gate
+until it has been reviewed and added deliberately. External crates may only
+come from crates.io or an explicitly allowed Git repository, and a Git
+dependency must be pinned to a commit revision. Workspace crates may depend on
+each other by path.
+
 For `apple-private-apis`, Coffer intends to use local anisette generation.
 Implicit fallback to a public or third-party remote anisette server must not be
 enabled accidentally.
@@ -344,8 +402,7 @@ repository and do not package them as part of Coffer releases.
 License and source provenance
 -----------------------------
 
-Coffer is GPL-3.0-or-later software. See *LICENSE* for the exact license
-expression.
+Coffer is GPL-3.0-or-later software. See *LICENSE* for the full license terms.
 
 License provenance is especially important because Coffer implements private
 protocols for which several independent reverse-engineered implementations
@@ -464,7 +521,9 @@ actually correct.
 Documentation
 -------------
 
-All Markdown is formatted with Hongdown.
+All Markdown is formatted with Hongdown. The project configuration lives in
+*.hongdown.toml*; it sets `no_inherit = true` so that a contributor's personal
+Hongdown configuration cannot change what `mise run fmt` produces.
 
 After editing Markdown, run:
 

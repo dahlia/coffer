@@ -38,23 +38,23 @@ Milestone 0: Repository foundation
 Goal: establish a development environment in which subsequent protocol work is
 reproducible and difficult to accidentally weaken.
 
- -  [ ] Create the Cargo workspace using Rust 2024 edition.
- -  [ ] Configure the Rust toolchain through *mise.toml*.
- -  [ ] Include rust-analyzer, `rustfmt`, and Clippy in the mise-managed Rust
+ -  [x] Create the Cargo workspace using Rust 2024 edition.
+ -  [x] Configure the Rust toolchain through *mise.toml*.
+ -  [x] Include rust-analyzer, `rustfmt`, and Clippy in the mise-managed Rust
     toolchain.
- -  [ ] Configure workspace Rust warnings as errors.
- -  [ ] Configure Clippy's `all` lint group as errors.
- -  [ ] Add canonical `mise run fmt`, `mise run fmt-check`, `mise run check`,
-    `mise run test`, `mise run doc`, and `mise run ci` tasks.
- -  [ ] Add Hongdown through mise.
- -  [ ] Make Hongdown formatting part of the normal formatting and CI gates.
- -  [ ] Add CI that executes the same mise tasks used locally.
- -  [ ] Add the GPL-3.0-or-later license.
- -  [ ] Establish dependency-license auditing.
- -  [ ] Establish rules for secret redaction and protocol test fixtures.
- -  [ ] Establish a small architecture that keeps Apple protocols independent
+ -  [x] Configure workspace Rust warnings as errors.
+ -  [x] Configure Clippy's `all` lint group as errors.
+ -  [x] Add canonical `mise run fmt`, `mise run fmt-check`, `mise run check`,
+    `mise run build`, `mise run test`, `mise run doc`, and `mise run ci` tasks.
+ -  [x] Add Hongdown through mise.
+ -  [x] Make Hongdown formatting part of the normal formatting and CI gates.
+ -  [x] Add CI that executes the same mise tasks used locally.
+ -  [x] Add the GPL-3.0-or-later license.
+ -  [x] Establish dependency-license auditing.
+ -  [x] Establish rules for secret redaction and protocol test fixtures.
+ -  [x] Establish a small architecture that keeps Apple protocols independent
     from the GUI.
- -  [ ] Add `AGENTS.md` and `CLAUDE.md` as symbolic links to
+ -  [x] Add *AGENTS.md* and *CLAUDE.md* as symbolic links to
     *CONTRIBUTING.md*.
 
 
