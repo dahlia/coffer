@@ -1,0 +1,64 @@
+min_version = "2026.9.1"
+
+[settings]
+experimental = true
+
+[tools]
+"aqua:dahlia/hongdown" = "0.5.3"
+
+[tools.rust]
+version = "1.98.0"
+profile = "default"
+components = "rust-analyzer,rustfmt,clippy"
+
+# Formatting ------------------------------------------------------------------
+
+[tasks.fmt]
+description = "Format all project-owned source and documentation"
+run = ["cargo fmt --all", "hongdown --write", "mise fmt"]
+
+[tasks.fmt-check]
+description = "Verify formatting without modifying the working tree"
+run = ["cargo fmt --all --check", "hongdown --check", "mise fmt --check"]
+
+# Static verification ---------------------------------------------------------
+
+# Clippy runs the full rustc front end, so it subsumes `cargo check`.  Running
+# both would compile every workspace crate twice per gate.  `-D warnings` on the
+# command line backs up the workspace lint tables in Cargo.toml so that a crate
+# which forgets `[lints] workspace = true` still fails the gate.
+[tasks.clippy]
+description = "Type-check and lint every workspace target with Clippy"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.check]
+description = "Fast static verification for frequent use and pre-commit hooks"
+depends = ["fmt-check", "clippy"]
+
+# Build, test, and documentation ----------------------------------------------
+
+# `wait_for` serializes the cargo tasks only when they are already scheduled
+# together (for example under `mise run ci`) so that they do not contend for the
+# target directory lock.  Unlike `depends`, it does not pull Clippy into a plain
+# `mise run test`.
+[tasks.build]
+description = "Build every workspace target"
+wait_for = ["clippy"]
+run = "cargo build --workspace --all-targets --locked"
+
+[tasks.test]
+description = "Run the workspace test suite, including doctests"
+wait_for = ["build"]
+run = "cargo test --workspace --locked"
+
+[tasks.doc]
+description = "Build Rust API documentation with warnings denied"
+wait_for = ["test"]
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --workspace --no-deps --document-private-items --locked"
+
+# The gate --------------------------------------------------------------------
+
+[tasks.ci]
+description = "Complete verification gate; must match continuous integration"
+depends = ["check", "build", "test", "doc"]

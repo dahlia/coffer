@@ -1,0 +1,12 @@
+# Project-local Hongdown configuration.
+#
+# `no_inherit` keeps a contributor's personal Hongdown settings from changing
+# what `mise run fmt` produces, so local and CI formatting always agree.
+no_inherit = true
+include = ["*.md", "**/*.md"]
+# AGENTS.md and CLAUDE.md are symbolic links to CONTRIBUTING.md.
+exclude = ["**/target/**", "AGENTS.md", "CLAUDE.md"]
+
+[punctuation]
+# CONTRIBUTING.md forbids em dashes, so never synthesize one from "--".
+em_dash = false

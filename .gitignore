@@ -1,0 +1,10 @@
+/target/
+
+# Per-developer local overrides that must never change what the shared gate
+# does on another machine
+/.claude/settings.local.json
+mise.local.toml
+.mise.local.toml
+mise.*.local.toml
+.mise.*.local.toml
+/.config/mise/config.local.toml

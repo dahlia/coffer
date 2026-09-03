@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/coffer-protocol"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Hong Minhee <hong@minhee.org>"]
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/dahlia/coffer"
+publish = false
+
+# Every workspace crate must inherit these tables with `[lints] workspace = true`.
+[workspace.lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+# `unsafe` is acceptable only for FFI or operations that cannot reasonably be
+# expressed safely.  Allow it in the narrowest possible scope with a comment
+# explaining why the code is safer or clearer with the exception.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+# Every `unsafe` block must carry a `// SAFETY:` comment stating the invariants
+# that make the operation valid.
+undocumented_unsafe_blocks = "deny"
