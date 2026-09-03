@@ -1,0 +1,27 @@
+[package]
+name = "coffer-anisette"
+description = "Sandboxed local loader and ABI bridge for Apple's anisette support libraries"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+coffer-bootstrap = { path = "../coffer-bootstrap" }
+# `elf_loader` owns mapping, relocation, and page protection.  Defaults are
+# disabled to exclude object-file loading and lazy binding; `libc` supplies the
+# mmap backend and `version` is required for Android's `LIBC` symbol nodes.
+elf_loader = { version = "=0.17.0", default-features = false, features = ["libc", "version"] }
+# Safe parsing before any image is mapped.  Keep this aligned with elf_loader's
+# parser version so the graph carries one copy.
+elf = { version = "=0.8.0", default-features = false }
+libc = "0.2.189"
+sha2 = { version = "0.11.0", default-features = false }
+tempfile = { version = "3.27.0", default-features = false }
+zeroize = "1.9.0"
+
+[lints]
+workspace = true

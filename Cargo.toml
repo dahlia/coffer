@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/coffer-anisette",
     "crates/coffer-bootstrap",
     "crates/coffer-protocol",
     "crates/coffer-service",

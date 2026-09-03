@@ -322,6 +322,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "coffer-anisette"
+version = "0.1.0"
+dependencies = [
+ "coffer-bootstrap",
+ "elf",
+ "elf_loader",
+ "libc",
+ "sha2",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "coffer-bootstrap"
 version = "0.1.0"
 dependencies = [
@@ -461,6 +474,26 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "ctutils",
+]
+
+[[package]]
+name = "elf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
+
+[[package]]
+name = "elf_loader"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a38a44434d33e972e24b099f5a0f77f6d1389cc4a8864df16f3af90275d61eb7"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "elf",
+ "libc",
+ "spin",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1313,6 +1346,12 @@ name = "smallvec"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "srp"
