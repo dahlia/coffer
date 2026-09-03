@@ -49,6 +49,10 @@ The Rust toolchain configured in *mise.toml* must include:
 Auxiliary tools, including [Hongdown], [cargo-deny], [actionlint], and
 [zizmor], must likewise be managed through mise where practical.
 
+Linux builds also require `pkg-config` and OpenSSL development headers because
+the Secret Service adapter selects oo7's `openssl_crypto` backend to avoid an
+unwiped plaintext buffer in oo7 0.6.0's `native_crypto` implementation.
+
 Avoid introducing ad hoc setup commands when the operation should instead be a
 reproducible mise task.
 

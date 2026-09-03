@@ -211,6 +211,12 @@ impl AccountName {
 
 redacted_debug!(AccountName);
 
+impl Drop for AccountName {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// The account's directory services identifier (`adsid`).
 ///
 /// Apple returns it in the decrypted server-provided data after a successful
@@ -234,6 +240,12 @@ impl AccountId {
 }
 
 redacted_debug!(AccountId);
+
+impl Drop for AccountId {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// The GS IdMS token (`GsIdmsToken`) that identifies an authenticated session.
 ///

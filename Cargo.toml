@@ -1,6 +1,13 @@
 [workspace]
-members = ["crates/coffer-bootstrap", "crates/coffer-protocol"]
+members = [
+    "crates/coffer-bootstrap",
+    "crates/coffer-protocol",
+    "crates/coffer-service",
+]
 resolver = "3"
+
+[patch.crates-io]
+oo7 = { path = "crates/coffer-service/vendor/oo7-0.6.0" }
 
 [workspace.package]
 version = "0.1.0"

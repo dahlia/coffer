@@ -1,0 +1,28 @@
+[package]
+name = "coffer-service"
+description = "Application services and Linux platform integration for Coffer"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ciborium = { version = "0.2.2", default-features = false, features = ["std"] }
+coffer-protocol = { path = "../coffer-protocol" }
+# Use only the explicit D-Bus Secret Service backend.  Disabling defaults keeps
+# oo7's automatic portal/encrypted-file selection out of Coffer.  Its OpenSSL
+# backend decrypts directly into zeroizing storage; async-std matches this
+# runtime-neutral service layer without imposing Tokio on callers.
+oo7 = { version = "=0.6.0", default-features = false, features = ["async-std", "openssl_crypto"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+serde_bytes = "0.11.19"
+zeroize = "1.9.0"
+
+[dev-dependencies]
+futures-lite = "2.6.1"
+
+[lints]
+workspace = true

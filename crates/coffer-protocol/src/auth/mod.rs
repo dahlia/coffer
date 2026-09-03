@@ -123,6 +123,8 @@ mod srp;
 use core::fmt;
 use std::collections::BTreeMap;
 
+use zeroize::{Zeroize, Zeroizing};
+
 pub use error::{
     AuthError, AuthErrorKind, AuthStage, Malformed, MalformedReason, ProtocolStatus, ServerSelector,
 };
@@ -627,7 +629,7 @@ pub struct Session {
     account_id: AccountId,
     idms_token: IdmsToken,
     session_key: SessionKey,
-    cookie: Vec<u8>,
+    cookie: Zeroizing<Vec<u8>>,
     tokens: BTreeMap<String, ServiceToken>,
     given_name: Option<String>,
     family_name: Option<String>,
@@ -719,5 +721,12 @@ impl Session {
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Session(<redacted>)")
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.given_name.zeroize();
+        self.family_name.zeroize();
     }
 }

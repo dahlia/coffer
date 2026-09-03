@@ -86,7 +86,7 @@ pub(crate) struct ServerProvidedData {
     pub account_id: AccountId,
     pub idms_token: IdmsToken,
     pub session_key: SessionKey,
-    pub cookie: Vec<u8>,
+    pub cookie: Zeroizing<Vec<u8>>,
     pub tokens: BTreeMap<String, ServiceToken>,
     pub given_name: Option<String>,
     pub family_name: Option<String>,
@@ -117,7 +117,14 @@ pub(crate) fn parse(
         )
     })?;
     let session_key = SessionKey::new(sk);
-    let cookie = get_data(dict, "c", limits.max_cookie)?.to_vec();
+    let cookie = get_data(dict, "c", limits.max_cookie)?;
+    if cookie.is_empty() {
+        return Err(Malformed::new(
+            "c",
+            MalformedReason::TooShort { minimum: 1 },
+        ));
+    }
+    let cookie = Zeroizing::new(cookie.to_vec());
     let tokens = parse_tokens(dict, limits)?;
     let given_name = optional_string(dict, "fn", limits)?;
     let family_name = optional_string(dict, "ln", limits)?;

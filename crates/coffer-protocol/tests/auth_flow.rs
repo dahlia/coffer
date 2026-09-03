@@ -1296,6 +1296,29 @@ fn empty_required_credentials_in_decrypted_data_are_rejected() {
 }
 
 #[test]
+fn empty_reusable_cookie_in_decrypted_data_is_rejected() {
+    let v = vector::compute();
+    let mut plaintext = Value::from_reader(std::io::Cursor::new(&v.spd_plaintext))
+        .unwrap()
+        .into_dictionary()
+        .unwrap();
+    plaintext.insert("c".to_owned(), Value::Data(Vec::new()));
+    let plaintext = vector::plist_bytes(Value::Dictionary(plaintext));
+    let (_, _, ciphertext) = vector::encrypt_spd(&v.k, &plaintext);
+    let complete = edited(vector::complete_response_dict(&v, None), |d| {
+        d.insert("spd".to_owned(), Value::Data(ciphertext));
+    });
+    let auth = authenticator(vec![ok(vector::init_response(&v)), ok(complete)]);
+    expect_malformed(
+        &auth,
+        AuthStage::SrpComplete,
+        "c",
+        MalformedReason::TooShort { minimum: 1 },
+        2,
+    );
+}
+
+#[test]
 fn empty_service_token_is_rejected() {
     let v = vector::compute();
     let mut plaintext = Value::from_reader(std::io::Cursor::new(&v.spd_plaintext))
