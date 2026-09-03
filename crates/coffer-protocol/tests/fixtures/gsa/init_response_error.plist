@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Response</key>
+	<dict>
+		<key>Status</key>
+		<dict>
+			<key>ec</key>
+			<integer>-20101</integer>
+			<key>em</key>
+			<string>Synthetic: your Apple Account or password was incorrect.</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Response</key>
+	<dict>
+		<key>B</key>
+		<data>
+		aojNzXeOVqVz6n7nuiriDdtFPKu5xQYR4rag1CM+8E0bih4Dzzbb5i0VCYJkUxMEtL4u
+		XgTCmhyP3JrWBxlHXXFr1dxhn7mE/ZIxeSKkDu/gYrsb8t84Ej85yT2SunDyYt3OKxPs
+		FLfnVVYAzEloA2MeCRObir9YrgniJCnvlRO+u/NFvcN0sJyBREg1GTisRnSuuiWEb7jo
+		PCNwF84kWKlVmv/dns58Ns0E+iQEUb1aCYd0cZj+8hICnPqYflTkC4WXwGfoYO9HGyBL
+		n/Pg7j5vE6xzgt5D9NZUpGuTpE5vKrDXzXMpAuGGKQ3FlrKyzxtfnwx9mCUasdMl+pdy
+		0g==
+		</data>
+		<key>Status</key>
+		<dict>
+			<key>ec</key>
+			<integer>0</integer>
+			<key>em</key>
+			<string></string>
+		</dict>
+		<key>c</key>
+		<string>synthetic-gsa-cookie-0001</string>
+		<key>i</key>
+		<integer>20832</integer>
+		<key>s</key>
+		<data>
+		Y29mZmVyLXNhbHQtMDAwMQ==
+		</data>
+	</dict>
+</dict>
+</plist>

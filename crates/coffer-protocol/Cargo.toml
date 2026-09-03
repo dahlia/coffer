@@ -11,3 +11,33 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# Every cryptographic primitive comes from a reviewed RustCrypto crate; this
+# crate only composes them.  Default features are disabled wherever they would
+# pull in `std`-only conveniences or platform randomness that the crate does
+# not use: randomness and I/O are injected by the caller.
+[dependencies]
+# AES-256-CBC with PKCS#7 padding decrypts the server-provided data `spd`.
+aes = "0.9.3"
+cbc = { version = "0.2.1", default-features = false, features = ["alloc", "block-padding"] }
+# `X-Apple-Identity-Token` is base64.  The version matches the one `plist`
+# already depends on so that the graph carries a single copy.
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+# SHA-256, HMAC-SHA256, and PBKDF2-HMAC-SHA256 for the `s2k` password key,
+# the `spd` key derivation, and the SRP hash.
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+sha2 = "0.11.0"
+# GSA speaks XML property lists.  The `serde` feature is unnecessary: requests
+# are built and responses are read through `plist::Value` with explicit
+# bounds checks.
+plist = { version = "1.10.0", default-features = false }
+# SRP-6a arithmetic.  0.7 is the first release whose client supports Apple's
+# variant (`username_in_x = false`, padded `u`, `K = H(S)`, RFC 5054 `M1`) and
+# is built on constant-time `crypto-bigint`; it is still a release candidate,
+# so it is pinned exactly and must be re-reviewed when 0.7.0 ships.  The
+# `getrandom` default feature is disabled: the ephemeral comes from the
+# caller's `Entropy` source.
+srp = { version = "=0.7.0-rc.3", default-features = false }
+# Passwords, codes, keys, and tokens are wiped on drop.
+zeroize = "1.9.0"

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Header</key>
+	<dict>
+		<key>Version</key>
+		<string>1.0.1</string>
+	</dict>
+	<key>Request</key>
+	<dict>
+		<key>M1</key>
+		<data>
+		41uXhhypzX2kdP5DPPu3f3CjUcLMRA5DIBcirBTBv5w=
+		</data>
+		<key>c</key>
+		<string>synthetic-gsa-cookie-0001</string>
+		<key>cpd</key>
+		<dict>
+			<key>X-Apple-I-Client-Time</key>
+			<string>2026-09-04T00:00:00Z</string>
+			<key>X-Apple-I-MD</key>
+			<string>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</string>
+			<key>X-Apple-I-MD-LU</key>
+			<string>SYNTHETICLOCALUSERID000000000000</string>
+			<key>X-Apple-I-MD-M</key>
+			<string>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</string>
+			<key>X-Apple-I-MD-RINFO</key>
+			<string>17106176</string>
+			<key>X-Apple-I-SRL-NO</key>
+			<string>0</string>
+			<key>X-Apple-I-TimeZone</key>
+			<string>UTC</string>
+			<key>X-Apple-Locale</key>
+			<string>en_US</string>
+			<key>X-Mme-Device-Id</key>
+			<string>00000000-0000-4000-8000-000000000000</string>
+			<key>bootstrap</key>
+			<string>true</string>
+			<key>icscrec</key>
+			<string>true</string>
+			<key>loc</key>
+			<string>en_US</string>
+			<key>pbe</key>
+			<string>false</string>
+			<key>prkgen</key>
+			<string>true</string>
+			<key>svct</key>
+			<string>iCloud</string>
+		</dict>
+		<key>o</key>
+		<string>complete</string>
+		<key>u</key>
+		<string>coffer-fixture@example.invalid</string>
+	</dict>
+</dict>
+</plist>

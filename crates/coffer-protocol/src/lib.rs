@@ -35,10 +35,25 @@
 //!   are never retried automatically.
 //! - Secrets handled here (passwords, tokens, keys, passcodes, recovery
 //!   material) must not appear in logs, panics, `Debug` output, or fixtures.
+//! - This crate performs no I/O of its own.  Network exchanges go through the
+//!   [`transport::Transport`] trait, anisette data comes from an
+//!   [`anisette::AnisetteProvider`], and randomness comes from an
+//!   [`entropy::Entropy`] source.  All three are supplied by the caller, which
+//!   keeps the protocol logic runtime-neutral and testable offline.
 //!
 //! # Status
 //!
-//! The crate is empty apart from this documentation.  Apple Account
-//! authentication is the first capability scheduled for it; see the project
-//! roadmap for the intended order of work.
+//! The crate currently implements the offline-verifiable core of Apple
+//! Account authentication in the [`auth`] module: the GSA (GrandSlam
+//! Authentication) SRP password exchange, trusted-device two-factor
+//! submission, and the post-two-factor re-authentication that yields a
+//! usable session.  Anisette generation, a concrete HTTP transport, secret
+//! storage, and everything past authentication are scheduled for later work;
+//! see the project roadmap.
 #![forbid(unsafe_code)]
+
+pub mod anisette;
+pub mod auth;
+pub mod entropy;
+pub mod secret;
+pub mod transport;

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Header</key>
+	<dict>
+		<key>Version</key>
+		<string>1.0.1</string>
+	</dict>
+	<key>Request</key>
+	<dict>
+		<key>A2k</key>
+		<data>
+		fOxBlekfZQ03WV5tca+S3SmnBXVYo0Rf6ULvq2CbPMWa0OwuOyLaEnHq3R6NapkH26Tc
+		q6/vAA87lR2vVXfGfvKz4+uVl0SW5usbZ7LPLMOt7UfxuL9FdKnNf56+rXtbj2XNiTwD
+		RDMW0UZgkzft/vJ8fc1yga3yB8L3SF/6N60ui3n4wMEpBoJ3+EUwS+fr4K62NmzOltFf
+		/zQf2hgJ0WcfFuf5DfYBo3qzIFzfU0rspsK4e/Eqc3y7XyYTBS/3fGbZHW3nK+4/FKI7
+		4bCDncWoJfZOXunsLP7A8PmXJ4T2nKWeuppNiu+0lvXwvqCW4yGj7SIQSx/MLitF/R0o
+		Gg==
+		</data>
+		<key>cpd</key>
+		<dict>
+			<key>X-Apple-I-Client-Time</key>
+			<string>2026-09-04T00:00:00Z</string>
+			<key>X-Apple-I-MD</key>
+			<string>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</string>
+			<key>X-Apple-I-MD-LU</key>
+			<string>SYNTHETICLOCALUSERID000000000000</string>
+			<key>X-Apple-I-MD-M</key>
+			<string>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</string>
+			<key>X-Apple-I-MD-RINFO</key>
+			<string>17106176</string>
+			<key>X-Apple-I-SRL-NO</key>
+			<string>0</string>
+			<key>X-Apple-I-TimeZone</key>
+			<string>UTC</string>
+			<key>X-Apple-Locale</key>
+			<string>en_US</string>
+			<key>X-Mme-Device-Id</key>
+			<string>00000000-0000-4000-8000-000000000000</string>
+			<key>bootstrap</key>
+			<string>true</string>
+			<key>icscrec</key>
+			<string>true</string>
+			<key>loc</key>
+			<string>en_US</string>
+			<key>pbe</key>
+			<string>false</string>
+			<key>prkgen</key>
+			<string>true</string>
+			<key>svct</key>
+			<string>iCloud</string>
+		</dict>
+		<key>o</key>
+		<string>init</string>
+		<key>ps</key>
+		<array>
+			<string>s2k</string>
+			<string>s2k_fo</string>
+		</array>
+		<key>u</key>
+		<string>coffer-fixture@example.invalid</string>
+	</dict>
+</dict>
+</plist>
