@@ -5,6 +5,8 @@ experimental = true
 
 [tools]
 "aqua:dahlia/hongdown" = "0.5.3"
+"aqua:rhysd/actionlint" = "1.7.12"
+"aqua:zizmorcore/zizmor" = "1.30.0"
 
 [tools.rust]
 version = "1.98.0"
@@ -31,9 +33,17 @@ run = ["cargo fmt --all --check", "hongdown --check", "mise fmt --check"]
 description = "Type-check and lint every workspace target with Clippy"
 run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
+[tasks.lint-actions]
+description = "Lint GitHub Actions workflows"
+# Disable opportunistic host tools so actionlint behaves identically everywhere.
+run = [
+  "actionlint -shellcheck= -pyflakes=",
+  "zizmor --offline .github/workflows",
+]
+
 [tasks.check]
 description = "Fast static verification for frequent use and pre-commit hooks"
-depends = ["fmt-check", "clippy"]
+depends = ["fmt-check", "clippy", "lint-actions"]
 
 # Build, test, and documentation ----------------------------------------------
 
