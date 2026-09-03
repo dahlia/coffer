@@ -28,8 +28,10 @@ run = ["cargo fmt --all --check", "hongdown --check", "mise fmt --check"]
 
 # Clippy runs the full rustc front end, so it subsumes `cargo check`.  Running
 # both would compile every workspace crate twice per gate.  `-D warnings` on the
-# command line backs up the workspace lint tables in Cargo.toml so that a crate
-# which forgets `[lints] workspace = true` still fails the gate.
+# command line backs up ordinary warnings and Clippy's `all` group for a crate
+# that forgets `[lints] workspace = true`; the allow-by-default lints in
+# Cargo.toml (missing docs, unsafe code, undocumented unsafe blocks) reach a
+# crate only through that inherit line, so check it in every new manifest.
 [tasks.clippy]
 description = "Type-check and lint every workspace target with Clippy"
 run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
