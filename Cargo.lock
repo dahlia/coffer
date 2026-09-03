@@ -340,6 +340,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

@@ -32,9 +32,14 @@ use std::io::{self, Cursor, Read};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ring::rand::SystemRandom;
+use ring::signature::{self, KeyPair, RsaKeyPair};
+use sha2::{Digest, Sha256};
+
 use crate::arch::{Architecture, ElfClass};
 use crate::archive::{CORE_ADI_LIBRARY, STORE_SERVICES_CORE_LIBRARY};
 use crate::limits::Limits;
+use crate::signature::{RSA_PKCS1_SHA256_ALGORITHM_ID, SignerPolicy};
 use crate::source::{ArtifactSource, FetchError, FetchedArtifact, ObservedArtifact, SourceUrl};
 
 /// `PK\x01\x02`.
@@ -54,6 +59,78 @@ const UNIX_VERSION_MADE_BY: u16 = (3 << 8) | 20;
 
 /// A regular file with mode 0644.
 const DEFAULT_UNIX_MODE: u32 = 0o100_644;
+
+/// APK Signature Scheme v2 ID-value pair.
+pub(crate) const SYNTHETIC_V2_BLOCK_ID: u32 = 0x7109_871a;
+
+/// APK Signature Scheme v3 ID-value pair.
+pub(crate) const SYNTHETIC_V3_BLOCK_ID: u32 = 0xf053_68c0;
+
+/// APK Signature Scheme v3.1 ID-value pair.
+pub(crate) const SYNTHETIC_V31_BLOCK_ID: u32 = 0x1b93_ad61;
+
+/// APK v2 stripping-protection attribute.
+pub(crate) const SYNTHETIC_STRIPPING_PROTECTION_ID: u32 = 0xbeef_f00d;
+
+const SYNTHETIC_CERTIFICATE_SHA256: [u8; 32] = [
+    0x9f, 0xa8, 0x94, 0xcd, 0x64, 0x79, 0xe2, 0xc6, 0x1a, 0x6d, 0xcb, 0x4e, 0x23, 0xe4, 0x00, 0x4e,
+    0x65, 0x07, 0xe3, 0x34, 0x8d, 0xe3, 0x13, 0xea, 0x76, 0x1a, 0xb7, 0xe7, 0x60, 0x19, 0xbe, 0xbd,
+];
+
+const SYNTHETIC_SPKI_SHA256: [u8; 32] = [
+    0xd1, 0x3d, 0x69, 0x9b, 0x05, 0x54, 0xe4, 0x11, 0x09, 0x96, 0x37, 0x65, 0x19, 0xa5, 0x49, 0x7b,
+    0x19, 0x08, 0x09, 0x5c, 0x52, 0x45, 0xe7, 0x43, 0x36, 0x35, 0x8e, 0x04, 0xc2, 0x38, 0x8a, 0x7d,
+];
+
+/// The synthetic signer policy used by bootstrap unit tests.
+pub(crate) const fn synthetic_signer_policy() -> SignerPolicy {
+    SignerPolicy {
+        certificate_sha256: SYNTHETIC_CERTIFICATE_SHA256,
+        spki_sha256: SYNTHETIC_SPKI_SHA256,
+    }
+}
+
+/// Deliberate variations for a synthetic APK v2 signing block.
+#[derive(Clone, Debug)]
+pub(crate) struct SyntheticSignature {
+    pub(crate) digest_algorithm: u32,
+    pub(crate) signature_algorithm: u32,
+    pub(crate) signer_count: usize,
+    pub(crate) digest_count: usize,
+    pub(crate) signature_count: usize,
+    pub(crate) certificate_count: usize,
+    pub(crate) content_digest_length: usize,
+    pub(crate) corrupt_content_digest: bool,
+    pub(crate) corrupt_signature: bool,
+    pub(crate) unpinned_certificate: bool,
+    pub(crate) unpinned_spki: bool,
+    pub(crate) signed_data_tail: Vec<u8>,
+    pub(crate) attributes: Vec<(u32, Vec<u8>)>,
+    pub(crate) additional_pairs: Vec<(u32, Vec<u8>)>,
+    pub(crate) duplicate_v2: bool,
+}
+
+impl Default for SyntheticSignature {
+    fn default() -> Self {
+        Self {
+            digest_algorithm: RSA_PKCS1_SHA256_ALGORITHM_ID,
+            signature_algorithm: RSA_PKCS1_SHA256_ALGORITHM_ID,
+            signer_count: 1,
+            digest_count: 1,
+            signature_count: 1,
+            certificate_count: 1,
+            content_digest_length: 32,
+            corrupt_content_digest: false,
+            corrupt_signature: false,
+            unpinned_certificate: false,
+            unpinned_spki: false,
+            signed_data_tail: Vec::new(),
+            attributes: Vec::new(),
+            additional_pairs: Vec::new(),
+            duplicate_v2: false,
+        }
+    }
+}
 
 /// Builds a synthetic ELF shared object for `architecture`.
 ///
@@ -365,6 +442,244 @@ impl SyntheticArchive {
         archive.extend_from_slice(&self.comment);
         archive
     }
+
+    /// Serializes and signs the synthetic ZIP with APK Signature Scheme v2.
+    pub(crate) fn build_signed(&self) -> Vec<u8> {
+        self.build_signed_with(&SyntheticSignature::default())
+    }
+
+    /// Serializes the synthetic ZIP with a configurable v2 signing block.
+    pub(crate) fn build_signed_with(&self, options: &SyntheticSignature) -> Vec<u8> {
+        let archive = self.build();
+        let eocd_offset = archive
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .expect("synthetic archive has an end record");
+        let central_directory_offset = u32::from_le_bytes(
+            archive[eocd_offset + 16..eocd_offset + 20]
+                .try_into()
+                .expect("four bytes"),
+        ) as usize;
+        let content_digest = synthetic_content_digest(
+            &archive[..central_directory_offset],
+            &archive[central_directory_offset..eocd_offset],
+            &archive[eocd_offset..],
+        );
+        let mut signed_digest = content_digest;
+        if options.corrupt_content_digest {
+            signed_digest[0] ^= 1;
+        }
+
+        let key_bytes = decode_hex(include_str!(
+            "../tests/fixtures/synthetic-apk-signing-key.pkcs1.hex"
+        ));
+        let key_pair = RsaKeyPair::from_der(&key_bytes).expect("valid synthetic PKCS#1 key");
+        let mut spki = rsa_spki(key_pair.public_key().as_ref());
+        if options.unpinned_spki {
+            let last = spki.last_mut().expect("SPKI is nonempty");
+            *last ^= 1;
+        }
+        let mut certificate = decode_hex(include_str!(
+            "../tests/fixtures/synthetic-apk-signing-certificate.der.hex"
+        ));
+        if options.unpinned_certificate {
+            let last = certificate.last_mut().expect("certificate is nonempty");
+            *last ^= 1;
+        }
+
+        let digest_length = options.content_digest_length.min(signed_digest.len());
+        let digest_record = [
+            options.digest_algorithm.to_le_bytes().as_slice(),
+            length_prefixed(&signed_digest[..digest_length]).as_slice(),
+        ]
+        .concat();
+        let mut digest_records = Vec::new();
+        for _ in 0..options.digest_count {
+            digest_records.extend(length_prefixed(&digest_record));
+        }
+        let mut certificate_records = Vec::new();
+        for _ in 0..options.certificate_count {
+            certificate_records.extend(length_prefixed(&certificate));
+        }
+        let mut attributes = Vec::new();
+        for (id, value) in &options.attributes {
+            let mut attribute = id.to_le_bytes().to_vec();
+            attribute.extend_from_slice(value);
+            attributes.extend(length_prefixed(&attribute));
+        }
+        let mut signed_data = Vec::new();
+        signed_data.extend(length_prefixed(&digest_records));
+        signed_data.extend(length_prefixed(&certificate_records));
+        signed_data.extend(length_prefixed(&attributes));
+        signed_data.extend_from_slice(&options.signed_data_tail);
+
+        let mut signature_bytes = vec![0u8; key_pair.public().modulus_len()];
+        key_pair
+            .sign(
+                &signature::RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                &signed_data,
+                &mut signature_bytes,
+            )
+            .expect("synthetic RSA signing succeeds");
+        if options.corrupt_signature {
+            signature_bytes[0] ^= 1;
+        }
+        let signature_record = [
+            options.signature_algorithm.to_le_bytes().as_slice(),
+            length_prefixed(&signature_bytes).as_slice(),
+        ]
+        .concat();
+        let mut signature_records = Vec::new();
+        for _ in 0..options.signature_count {
+            signature_records.extend(length_prefixed(&signature_record));
+        }
+        let mut signer = Vec::new();
+        signer.extend(length_prefixed(&signed_data));
+        signer.extend(length_prefixed(&signature_records));
+        signer.extend(length_prefixed(&spki));
+        let mut signers = Vec::new();
+        for _ in 0..options.signer_count {
+            signers.extend(length_prefixed(&signer));
+        }
+        let v2_value = length_prefixed(&signers);
+
+        let mut pairs = id_value_pair(SYNTHETIC_V2_BLOCK_ID, &v2_value);
+        if options.duplicate_v2 {
+            pairs.extend(id_value_pair(SYNTHETIC_V2_BLOCK_ID, &v2_value));
+        }
+        for (id, value) in &options.additional_pairs {
+            pairs.extend(id_value_pair(*id, value));
+        }
+        let block_size = u64::try_from(pairs.len() + 24).expect("fixture block fits");
+        let mut signing_block = Vec::new();
+        signing_block.extend(block_size.to_le_bytes());
+        signing_block.extend(pairs);
+        signing_block.extend(block_size.to_le_bytes());
+        signing_block.extend_from_slice(b"APK Sig Block 42");
+
+        let final_central_directory_offset = central_directory_offset + signing_block.len();
+        let mut result = archive[..central_directory_offset].to_vec();
+        result.extend(signing_block);
+        result.extend_from_slice(&archive[central_directory_offset..]);
+        let final_eocd_offset = eocd_offset + result.len() - archive.len();
+        result[final_eocd_offset + 16..final_eocd_offset + 20].copy_from_slice(
+            &u32::try_from(final_central_directory_offset)
+                .expect("fixture fits in 32 bits")
+                .to_le_bytes(),
+        );
+        result
+    }
+}
+
+fn synthetic_content_digest(entry: &[u8], central: &[u8], rewritten_eocd: &[u8]) -> [u8; 32] {
+    let chunks = [entry, central, rewritten_eocd]
+        .iter()
+        .map(|section| section.len().div_ceil(1 << 20))
+        .sum::<usize>();
+    let mut top = Sha256::new();
+    top.update([0x5a]);
+    top.update(
+        u32::try_from(chunks)
+            .expect("fixture chunk count fits")
+            .to_le_bytes(),
+    );
+    for section in [entry, central, rewritten_eocd] {
+        for chunk in section.chunks(1 << 20) {
+            let mut digest = Sha256::new();
+            digest.update([0xa5]);
+            digest.update(
+                u32::try_from(chunk.len())
+                    .expect("one-MiB chunk")
+                    .to_le_bytes(),
+            );
+            digest.update(chunk);
+            top.update(digest.finalize());
+        }
+    }
+    top.finalize().into()
+}
+
+fn id_value_pair(id: u32, value: &[u8]) -> Vec<u8> {
+    let mut pair = Vec::new();
+    pair.extend(
+        u64::try_from(4 + value.len())
+            .expect("fixture pair fits")
+            .to_le_bytes(),
+    );
+    pair.extend(id.to_le_bytes());
+    pair.extend_from_slice(value);
+    pair
+}
+
+fn length_prefixed(value: &[u8]) -> Vec<u8> {
+    let mut encoded = u32::try_from(value.len())
+        .expect("fixture field fits")
+        .to_le_bytes()
+        .to_vec();
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+fn rsa_spki(pkcs1: &[u8]) -> Vec<u8> {
+    let mut bit_string = vec![0];
+    bit_string.extend_from_slice(pkcs1);
+    let bit_string = der_tlv(0x03, &bit_string);
+    let algorithm = [
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+    ];
+    der_tlv(
+        0x30,
+        &[algorithm.as_slice(), bit_string.as_slice()].concat(),
+    )
+}
+
+/// Returns the valid synthetic SPKI for direct DER parser tests.
+pub(crate) fn rsa_spki_for_test() -> Vec<u8> {
+    let key = decode_hex(include_str!(
+        "../tests/fixtures/synthetic-apk-signing-key.pkcs1.hex"
+    ));
+    let key_pair = RsaKeyPair::from_der(&key).expect("valid synthetic PKCS#1 key");
+    rsa_spki(key_pair.public_key().as_ref())
+}
+
+fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut encoded = vec![tag];
+    if value.len() < 0x80 {
+        encoded.push(value.len() as u8);
+    } else {
+        let bytes = value.len().to_be_bytes();
+        let first = bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .expect("nonzero length");
+        encoded.push(0x80 | u8::try_from(bytes.len() - first).expect("length width"));
+        encoded.extend_from_slice(&bytes[first..]);
+    }
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+/// Decodes a lowercase hexadecimal test fixture.
+pub(crate) fn decode_hex(encoded: &str) -> Vec<u8> {
+    let encoded = encoded.trim();
+    assert!(
+        encoded.len().is_multiple_of(2),
+        "hex fixture has whole bytes"
+    );
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty(), "hex fixture has whole bytes");
+    pairs
+        .iter()
+        .map(|pair| {
+            let digit = |byte| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("hex fixture is lowercase hexadecimal"),
+            };
+            (digit(pair[0]) << 4) | digit(pair[1])
+        })
+        .collect()
 }
 
 /// One scripted answer from a [`FakeSource`].

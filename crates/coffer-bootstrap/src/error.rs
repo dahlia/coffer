@@ -40,6 +40,7 @@ use crate::arch::UnsupportedArchitecture;
 use crate::archive::{ArchiveViolation, SupportLibrary};
 use crate::elf::ElfViolation;
 use crate::paths::{LayoutViolation, PathResolutionError};
+use crate::signature::SignatureViolation;
 use crate::source::FetchError;
 
 /// The stage of bootstrap an error came from.
@@ -57,6 +58,8 @@ pub enum Stage {
     LoadingInstallation,
     /// Fetching the archive from Apple.
     Downloading,
+    /// Verifying the APK signature and pinned Apple signer.
+    VerifyingSignature,
     /// Reading and validating the archive.
     ReadingArchive,
     /// Writing the staged installation.
@@ -72,6 +75,7 @@ impl fmt::Display for Stage {
             Stage::Locking => "locking",
             Stage::LoadingInstallation => "loading the installed libraries",
             Stage::Downloading => "downloading the archive",
+            Stage::VerifyingSignature => "verifying the APK signature",
             Stage::ReadingArchive => "reading the archive",
             Stage::Staging => "staging the installation",
             Stage::Publishing => "publishing the installation",
@@ -107,6 +111,8 @@ pub enum BootstrapError {
         /// The length actually received.
         received: u64,
     },
+    /// The APK signature or pinned signer verification failed.
+    Signature(SignatureViolation),
     /// The archive is not the artifact Coffer expects.
     Archive(ArchiveViolation),
     /// An extracted library is not an acceptable shared object.
@@ -157,6 +163,7 @@ impl BootstrapError {
             | BootstrapError::ArchiveTooLarge { .. }
             | BootstrapError::ArchiveLengthMismatch { .. }
             | BootstrapError::NoInstallationAvailable { .. } => Stage::Downloading,
+            BootstrapError::Signature(_) => Stage::VerifyingSignature,
             BootstrapError::Archive(_) | BootstrapError::Library { .. } => Stage::ReadingArchive,
             BootstrapError::UnsafeLayout { stage, .. } | BootstrapError::Io { stage, .. } => *stage,
         }
@@ -191,6 +198,7 @@ impl fmt::Display for BootstrapError {
                 f,
                 "the archive declared {declared} bytes but {received} arrived"
             ),
+            BootstrapError::Signature(violation) => write!(f, "{violation}"),
             BootstrapError::Archive(violation) => write!(f, "{violation}"),
             BootstrapError::Library { library, violation } => {
                 write!(f, "{} is unusable: {violation}", library.file_name())
@@ -212,6 +220,7 @@ impl std::error::Error for BootstrapError {
             BootstrapError::PathResolution(error) => Some(error),
             BootstrapError::Fetch(error)
             | BootstrapError::NoInstallationAvailable { cause: error } => Some(error),
+            BootstrapError::Signature(violation) => Some(violation),
             BootstrapError::Archive(violation) => Some(violation),
             BootstrapError::Library { violation, .. } => Some(violation),
             BootstrapError::UnsafeLayout { violation, .. } => Some(violation),
@@ -241,6 +250,12 @@ impl From<ArchiveViolation> for BootstrapError {
     }
 }
 
+impl From<SignatureViolation> for BootstrapError {
+    fn from(violation: SignatureViolation) -> Self {
+        BootstrapError::Signature(violation)
+    }
+}
+
 impl From<FetchError> for BootstrapError {
     fn from(error: FetchError) -> Self {
         BootstrapError::Fetch(error)
@@ -267,6 +282,7 @@ mod tests {
                 declared: 10,
                 received: 9,
             },
+            BootstrapError::Signature(SignatureViolation::SignatureInvalid),
             BootstrapError::Archive(ArchiveViolation::DuplicateEntry),
             BootstrapError::Library {
                 library: SupportLibrary::CoreAdi,
@@ -366,7 +382,8 @@ mod tests {
     fn stages_are_ordered_as_bootstrap_runs_them() {
         assert!(Stage::Preparing < Stage::Locking);
         assert!(Stage::Locking < Stage::Downloading);
-        assert!(Stage::Downloading < Stage::ReadingArchive);
+        assert!(Stage::Downloading < Stage::VerifyingSignature);
+        assert!(Stage::VerifyingSignature < Stage::ReadingArchive);
         assert!(Stage::ReadingArchive < Stage::Staging);
         assert!(Stage::Staging < Stage::Publishing);
     }

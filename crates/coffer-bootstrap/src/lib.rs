@@ -46,6 +46,9 @@
 //!   [`APPLE_MUSIC_APK_URL`], an Apple-owned host,
 //!   with the server certificate verified against Mozilla's root bundle rather
 //!   than the system trust store, and with redirects refused outright.
+//! - Before ZIP parsing or extraction, APK Signature Scheme v2, the signed
+//!   CHUNKED_SHA256 digest, and pinned SHA-256 digests of Apple's signer
+//!   certificate and SubjectPublicKeyInfo are verified.
 //! - Every remote-controlled size is bounded before anything is allocated: the
 //!   response body, the central directory, the entry count, each entry's
 //!   compressed and uncompressed size, the sum of those, and the expansion
@@ -65,27 +68,16 @@
 //!   the archive itself is a temporary file that is deleted once the two
 //!   libraries have been extracted from it.
 //!
-//! **What Coffer does not check.**
+//! **Signature-policy limits.**
 //!
-//! Coffer does **not** verify the archive's own APK signature, and therefore
-//! does not verify that Apple signed the payload.  Implementing APK Signature
-//! Scheme v2 verification with a pinned Apple signing certificate is the check
-//! that would establish that, and it is not implemented here.
-//!
-//! The practical consequence: the trust anchor for these binaries is the TLS
-//! connection to `apps.mzstatic.com` and the integrity of Apple's content
-//! delivery network, plus everything structural in the list above.  An attacker
-//! who could serve a different archive from that origin under a certificate a
-//! Mozilla-trusted CA issued for that host would not be caught by this crate.
-//! The recorded digests make such a substitution *visible* after the fact —
-//! they do not prevent it, because Coffer has no pinned expected digest to
-//! compare against on a first install.
-//!
-//! The structural checks are not nothing: they bound every allocation, keep
-//! every byte outside the two allowlisted entries unread, and refuse anything
-//! that is not a shared object for this machine.  But they are integrity and
-//! shape checks, not an authenticity proof, and this crate does not claim
-//! otherwise.
+//! This is a deliberately narrow verifier, not a general Android package trust
+//! engine.  It accepts exactly one v2 signer using algorithm `0x0103`; v1-only,
+//! unsigned, v3, v3.1 and signer-rotation inputs fail closed.  Apple's current
+//! key is legacy 1024-bit RSA, so authenticity is limited by that key's
+//! strength.  Certificate validity periods, subject strings and public Web PKI
+//! chains are not trust inputs: the reviewed certificate and public-key digests
+//! are.  A legitimate signer rotation therefore requires a source update and
+//! code review instead of being accepted automatically.
 //!
 //! # Where things live
 //!
@@ -151,6 +143,7 @@ pub mod install;
 pub mod limits;
 pub mod metadata;
 pub mod paths;
+pub mod signature;
 pub mod source;
 
 #[cfg(test)]
@@ -164,6 +157,10 @@ pub use crate::error::{BootstrapError, Stage};
 pub use crate::http::AppleCdnSource;
 pub use crate::install::LockMode;
 pub use crate::limits::Limits;
-pub use crate::metadata::{ActiveInstall, InstallMetadata};
+pub use crate::metadata::{ActiveInstall, InstallMetadata, SignatureRecord};
 pub use crate::paths::{BootstrapPaths, PathResolutionError};
+pub use crate::signature::{
+    APPLE_MUSIC_SIGNER_CERTIFICATE_SHA256, APPLE_MUSIC_SIGNER_SPKI_SHA256, ApkSignature,
+    SignatureScheme, SignatureViolation, verify_apple_music_apk,
+};
 pub use crate::source::{APPLE_MUSIC_APK_URL, ArtifactSource, FetchError, SourceUrl};

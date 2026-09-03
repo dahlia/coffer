@@ -39,9 +39,12 @@ use crate::install::{
 use crate::limits::Limits;
 use crate::metadata::{
     ACTIVE_INSTALL_SCHEMA, ActiveInstall, FileRecord, INSTALL_METADATA_FILE,
-    INSTALL_METADATA_SCHEMA, InstallMetadata, PerformedCheck, SourceRecord,
+    INSTALL_METADATA_SCHEMA, InstallMetadata, PerformedCheck, SignatureRecord, SourceRecord,
 };
 use crate::paths::BootstrapPaths;
+#[cfg(not(test))]
+use crate::signature::APPLE_SIGNER_POLICY;
+use crate::signature::{ApkSignature, SignerPolicy, verify_with_policy};
 use crate::source::{ArtifactSource, ObservedArtifact, SourceUrl};
 
 /// The number of leading hexadecimal digits of the archive digest that name an
@@ -127,6 +130,7 @@ pub struct Bootstrap<S> {
     limits: Limits,
     architecture: Architecture,
     lock_mode: LockMode,
+    signature_policy: SignerPolicy,
 }
 
 impl<S: ArtifactSource> Bootstrap<S> {
@@ -149,12 +153,17 @@ impl<S: ArtifactSource> Bootstrap<S> {
     /// host of that architecture; nothing here cross-compiles.
     #[must_use]
     pub fn for_architecture(paths: BootstrapPaths, source: S, architecture: Architecture) -> Self {
+        #[cfg(test)]
+        let signature_policy = crate::synthetic::synthetic_signer_policy();
+        #[cfg(not(test))]
+        let signature_policy = APPLE_SIGNER_POLICY;
         Self {
             paths,
             source,
             limits: Limits::DEFAULT,
             architecture,
             lock_mode: LockMode::Wait,
+            signature_policy,
         }
     }
 
@@ -287,7 +296,12 @@ impl<S: ArtifactSource> Bootstrap<S> {
         let fetched = self.source.fetch(&url, &self.limits)?;
         let observed = fetched.observed;
 
-        let staged_archive = self.stage_archive(fetched.body, &observed)?;
+        let mut staged_archive = self.stage_archive(fetched.body, &observed)?;
+        let signature = verify_with_policy(
+            &mut staged_archive.file,
+            &self.limits,
+            &self.signature_policy,
+        )?;
         let install_id = staged_archive.digest[..INSTALL_ID_HEX_DIGITS].to_owned();
 
         let mut archive = Archive::open(staged_archive.file, &self.limits)?;
@@ -309,6 +323,7 @@ impl<S: ArtifactSource> Bootstrap<S> {
             &observed,
             &staged_archive.digest,
             staged_archive.received_length,
+            &signature,
             &payload,
         );
         let encoded = serde_json::to_vec_pretty(&metadata).map_err(|_| BootstrapError::Io {
@@ -429,6 +444,7 @@ impl<S: ArtifactSource> Bootstrap<S> {
         observed: &ObservedArtifact,
         archive_digest: &str,
         received_length: u64,
+        signature: &ApkSignature,
         payload: &[(SupportLibrary, String, Vec<u8>, ElfSummary, u32)],
     ) -> InstallMetadata {
         let files = payload
@@ -462,9 +478,27 @@ impl<S: ArtifactSource> Bootstrap<S> {
                 content_type: observed.content_type.clone(),
                 fetched_at_unix_seconds: unix_seconds(),
             },
+            signature: SignatureRecord {
+                scheme: signature.scheme.to_string(),
+                algorithm_id: format!("0x{:04x}", signature.algorithm_id),
+                certificate_sha256: to_hex(&signature.signer_certificate_sha256),
+                spki_sha256: to_hex(&signature.signer_spki_sha256),
+                content_digest_sha256: to_hex(&signature.content_digest_sha256),
+                signing_block_offset: signature.signing_block_offset,
+                signing_block_bytes: signature.signing_block_bytes,
+                content_chunk_count: signature.content_chunk_count,
+                other_block_ids: signature
+                    .other_block_ids
+                    .iter()
+                    .map(|id| format!("0x{id:08x}"))
+                    .collect(),
+                verified_at_unix_seconds: unix_seconds(),
+            },
             files,
             performed_checks: vec![
                 PerformedCheck::HttpsPinnedEndpoint,
+                PerformedCheck::ApkSignatureV2,
+                PerformedCheck::SignerPin,
                 PerformedCheck::ArchiveStructure,
                 PerformedCheck::EntryChecksum,
                 PerformedCheck::ElfHeader,
@@ -564,6 +598,17 @@ impl<S: ArtifactSource> Bootstrap<S> {
             || metadata.rust_target_arch != self.architecture.rust_target_arch()
             || metadata.android_abi != self.architecture.android_abi()
             || metadata.source.archive_sha256 != expected_archive_sha256
+            || metadata.signature.scheme != "v2"
+            || metadata.signature.algorithm_id != "0x0103"
+            || metadata.signature.certificate_sha256
+                != to_hex(&self.signature_policy.certificate_sha256)
+            || metadata.signature.spki_sha256 != to_hex(&self.signature_policy.spki_sha256)
+            || !metadata
+                .performed_checks
+                .contains(&PerformedCheck::ApkSignatureV2)
+            || !metadata
+                .performed_checks
+                .contains(&PerformedCheck::SignerPin)
         {
             return Ok(None);
         }
@@ -685,6 +730,7 @@ mod tests {
     use crate::source::FetchError;
     use crate::synthetic::{
         FakeResponse, FakeSource, SyntheticArchive, SyntheticEntry, synthetic_shared_object,
+        synthetic_signer_policy,
     };
     use std::fs;
     use tempfile::TempDir;
@@ -694,7 +740,7 @@ mod tests {
     const TEST_ARCHITECTURE: Architecture = Architecture::X86_64;
 
     fn good_archive() -> Vec<u8> {
-        SyntheticArchive::apple_music_like(TEST_ARCHITECTURE).build()
+        SyntheticArchive::apple_music_like(TEST_ARCHITECTURE).build_signed()
     }
 
     fn bootstrap_with(root: &TempDir, source: FakeSource) -> Bootstrap<FakeSource> {
@@ -767,6 +813,8 @@ mod tests {
         }
         for check in [
             PerformedCheck::HttpsPinnedEndpoint,
+            PerformedCheck::ApkSignatureV2,
+            PerformedCheck::SignerPin,
             PerformedCheck::ArchiveStructure,
             PerformedCheck::EntryChecksum,
             PerformedCheck::ElfHeader,
@@ -801,6 +849,84 @@ mod tests {
             .expect("load")
             .expect("an installation must be found");
         assert_eq!(reloaded, installed);
+    }
+
+    #[test]
+    fn cached_install_requires_current_signature_policy_evidence() {
+        type MetadataMutation = fn(&mut InstallMetadata);
+        let mutations: [(&str, MetadataMutation); 4] = [
+            ("certificate pin", |metadata| {
+                metadata.signature.certificate_sha256 = "00".repeat(32);
+            }),
+            ("SPKI pin", |metadata| {
+                metadata.signature.spki_sha256 = "00".repeat(32);
+            }),
+            ("v2 check", |metadata| {
+                metadata
+                    .performed_checks
+                    .retain(|check| *check != PerformedCheck::ApkSignatureV2);
+            }),
+            ("signer-pin check", |metadata| {
+                metadata
+                    .performed_checks
+                    .retain(|check| *check != PerformedCheck::SignerPin);
+            }),
+        ];
+
+        for (description, mutate) in mutations {
+            let root = TempDir::new().expect("temporary root");
+            let paths = BootstrapPaths::rooted_at(root.path());
+            let initial = Bootstrap::for_architecture(
+                paths.clone(),
+                FakeSource::serving(good_archive()),
+                TEST_ARCHITECTURE,
+            );
+            let installed = initial.ensure().expect("initial bootstrap");
+            let metadata_path = installed.library_root().join(INSTALL_METADATA_FILE);
+            let mut metadata: InstallMetadata =
+                serde_json::from_slice(&fs::read(&metadata_path).expect("read metadata"))
+                    .expect("parse metadata");
+            mutate(&mut metadata);
+            fs::write(
+                &metadata_path,
+                serde_json::to_vec_pretty(&metadata).expect("serialize metadata"),
+            )
+            .expect("rewrite metadata");
+
+            let replacement = Bootstrap::for_architecture(
+                paths,
+                FakeSource::serving(good_archive()),
+                TEST_ARCHITECTURE,
+            );
+            assert!(
+                replacement
+                    .installed()
+                    .expect("load invalid cache")
+                    .is_none(),
+                "a cache with stale {description} must not be reused"
+            );
+            let repaired = replacement.ensure().expect("repair invalid cache");
+            assert_eq!(replacement.source.calls(), 1);
+            assert_eq!(repaired.install_id(), installed.install_id());
+            assert_eq!(
+                repaired.metadata().signature.certificate_sha256,
+                to_hex(&synthetic_signer_policy().certificate_sha256)
+            );
+            assert_eq!(
+                repaired.metadata().signature.spki_sha256,
+                to_hex(&synthetic_signer_policy().spki_sha256)
+            );
+            assert!(
+                repaired
+                    .metadata()
+                    .performed_checks
+                    .contains(&PerformedCheck::ApkSignatureV2)
+                    && repaired
+                        .metadata()
+                        .performed_checks
+                        .contains(&PerformedCheck::SignerPin)
+            );
+        }
     }
 
     #[test]
@@ -861,6 +987,8 @@ mod tests {
         );
         let installed = good.ensure().expect("first bootstrap");
         let pointer_before = fs::read(paths.active_install_file()).expect("read pointer");
+        let mut invalid_signature = good_archive();
+        invalid_signature[35] ^= 1;
 
         // Every way an update can fail after a valid install already exists.
         let failures: Vec<(FakeSource, &str)> = vec![
@@ -873,12 +1001,16 @@ mod tests {
                 "interrupted transfer",
             ),
             (
+                FakeSource::serving(invalid_signature),
+                "cryptographic signature verification",
+            ),
+            (
                 FakeSource::serving(
                     SyntheticArchive::apple_music_like(TEST_ARCHITECTURE)
                         .without_entry(
                             &SupportLibrary::CoreAdi.archive_entry_name(TEST_ARCHITECTURE),
                         )
-                        .build(),
+                        .build_signed(),
                 ),
                 "archive missing a required entry",
             ),
@@ -889,7 +1021,7 @@ mod tests {
                             &SupportLibrary::CoreAdi.archive_entry_name(TEST_ARCHITECTURE),
                             b"not an ELF object".to_vec(),
                         )
-                        .build(),
+                        .build_signed(),
                 ),
                 "archive entry that is not a shared object",
             ),
@@ -956,7 +1088,7 @@ mod tests {
                         &SupportLibrary::CoreAdi.archive_entry_name(TEST_ARCHITECTURE),
                         synthetic_shared_object(TEST_ARCHITECTURE, 3_333),
                     )
-                    .build(),
+                    .build_signed(),
             ),
             TEST_ARCHITECTURE,
         );
@@ -1075,7 +1207,7 @@ mod tests {
                 FakeSource::serving(
                     SyntheticArchive::apple_music_like(TEST_ARCHITECTURE)
                         .without_entry(&name)
-                        .build(),
+                        .build_signed(),
                 ),
             );
             assert_eq!(
@@ -1097,7 +1229,7 @@ mod tests {
                         &SupportLibrary::StoreServicesCore.archive_entry_name(TEST_ARCHITECTURE),
                         synthetic_shared_object(other, 256),
                     )
-                    .build(),
+                    .build_signed(),
             ),
         );
         assert_eq!(
@@ -1124,7 +1256,7 @@ mod tests {
                 &SupportLibrary::CoreAdi.archive_entry_name(TEST_ARCHITECTURE),
                 synthetic_shared_object(TEST_ARCHITECTURE, 128),
             ))
-            .build();
+            .build_signed();
         // Flip a byte in the first entry's stored data.
         let data_offset = 30
             + SupportLibrary::StoreServicesCore
@@ -1136,7 +1268,7 @@ mod tests {
         let bootstrap = bootstrap_with(&root, FakeSource::serving(archive));
         assert_eq!(
             bootstrap.ensure().expect_err("corrupt entry"),
-            BootstrapError::Archive(ArchiveViolation::ChecksumMismatch)
+            BootstrapError::Signature(crate::signature::SignatureViolation::ContentDigestMismatch)
         );
     }
 
@@ -1163,7 +1295,7 @@ mod tests {
                 FakeSource::serving(
                     SyntheticArchive::apple_music_like(TEST_ARCHITECTURE)
                         .with_entry(entry)
-                        .build(),
+                        .build_signed(),
                 ),
             );
             assert_eq!(
@@ -1473,7 +1605,7 @@ mod tests {
                         &SupportLibrary::CoreAdi.archive_entry_name(TEST_ARCHITECTURE),
                         synthetic_shared_object(TEST_ARCHITECTURE, 9_000),
                     )
-                    .build(),
+                    .build_signed(),
             ),
             TEST_ARCHITECTURE,
         );
@@ -1516,7 +1648,7 @@ mod tests {
                         &SupportLibrary::StoreServicesCore.archive_entry_name(TEST_ARCHITECTURE),
                         synthetic_shared_object(TEST_ARCHITECTURE, 7_777),
                     )
-                    .build(),
+                    .build_signed(),
             ),
             TEST_ARCHITECTURE,
         );

@@ -24,10 +24,10 @@
 //!
 //! # Threat model
 //!
-//! The archive is remote input.  It is retrieved over HTTPS from an Apple-owned
-//! host, but Coffer does not verify the archive's own signature (see the crate
-//! documentation for exactly what that means), so this reader assumes the bytes
-//! are hostile:
+//! The archive is remote input.  [`crate::Bootstrap`] verifies its APK v2
+//! signature and pinned Apple signer before constructing this reader.  The
+//! reader remains a public API and does not itself establish that precondition,
+//! so it still treats every byte as hostile:
 //!
 //! - Every allocation is bounded before it is made, from a declared size that
 //!   is itself bounded first.

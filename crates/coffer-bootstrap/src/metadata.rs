@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// The schema number [`InstallMetadata`] documents carry.
-pub const INSTALL_METADATA_SCHEMA: u32 = 1;
+pub const INSTALL_METADATA_SCHEMA: u32 = 2;
 
 /// The schema number [`ActiveInstall`] documents carry.
 pub const ACTIVE_INSTALL_SCHEMA: u32 = 1;
@@ -75,6 +75,11 @@ pub enum PerformedCheck {
     /// [`AppleCdnSource`](crate::http::AppleCdnSource) provides the HTTPS
     /// guarantee described in that type's documentation.
     HttpsPinnedEndpoint,
+    /// The APK v2 RSA signature and CHUNKED_SHA256 content digest verified.
+    ApkSignatureV2,
+    /// Both signer DER digests matched source pins that require code review to
+    /// update.
+    SignerPin,
     /// The archive's ZIP structure passed the bounds and policy checks in
     /// [`crate::archive`].
     ArchiveStructure,
@@ -130,6 +135,31 @@ pub struct FileRecord {
     pub elf_class: u8,
 }
 
+/// Cryptographic verification facts recorded for the source APK.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SignatureRecord {
+    /// Signature scheme wire name, currently `v2`.
+    pub scheme: String,
+    /// APK signature algorithm ID in lowercase hexadecimal.
+    pub algorithm_id: String,
+    /// SHA-256 of the signer certificate DER.
+    pub certificate_sha256: String,
+    /// SHA-256 of the signer SubjectPublicKeyInfo DER.
+    pub spki_sha256: String,
+    /// Verified CHUNKED_SHA256 content digest.
+    pub content_digest_sha256: String,
+    /// Offset of the APK Signing Block.
+    pub signing_block_offset: u64,
+    /// Total size of the APK Signing Block.
+    pub signing_block_bytes: u64,
+    /// Number of one-MiB chunks included in the content digest.
+    pub content_chunk_count: u32,
+    /// Unknown top-level signing-block IDs that were tolerated.
+    pub other_block_ids: Vec<String>,
+    /// When verification succeeded, in seconds since the Unix epoch.
+    pub verified_at_unix_seconds: u64,
+}
+
 /// The metadata document written inside an install directory.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InstallMetadata {
@@ -144,6 +174,8 @@ pub struct InstallMetadata {
     pub android_abi: String,
     /// Where the payload came from.
     pub source: SourceRecord,
+    /// The verified APK signature and signer identity.
+    pub signature: SignatureRecord,
     /// The installed files, keyed by their path relative to the install
     /// directory.
     pub files: BTreeMap<String, FileRecord>,
@@ -203,9 +235,23 @@ mod tests {
                 content_type: Some("application/vnd.android.package-archive".to_owned()),
                 fetched_at_unix_seconds: 1_788_000_000,
             },
+            signature: SignatureRecord {
+                scheme: "v2".to_owned(),
+                algorithm_id: "0x0103".to_owned(),
+                certificate_sha256: "c".repeat(64),
+                spki_sha256: "d".repeat(64),
+                content_digest_sha256: "e".repeat(64),
+                signing_block_offset: 1_000,
+                signing_block_bytes: 2_000,
+                content_chunk_count: 3,
+                other_block_ids: vec!["0x12345678".to_owned()],
+                verified_at_unix_seconds: 1_788_000_000,
+            },
             files,
             performed_checks: vec![
                 PerformedCheck::HttpsPinnedEndpoint,
+                PerformedCheck::ApkSignatureV2,
+                PerformedCheck::SignerPin,
                 PerformedCheck::ArchiveStructure,
                 PerformedCheck::EntryChecksum,
                 PerformedCheck::ElfHeader,
@@ -278,6 +324,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PerformedCheck::HttpsPinnedEndpoint).unwrap(),
             "\"https-pinned-endpoint\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PerformedCheck::ApkSignatureV2).unwrap(),
+            "\"apk-signature-v2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PerformedCheck::SignerPin).unwrap(),
+            "\"signer-pin\""
         );
         assert_eq!(
             serde_json::to_string(&PerformedCheck::ArchiveStructure).unwrap(),

@@ -16,6 +16,8 @@ publish.workspace = true
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 # CRC-32 verification of extracted archive members.
 crc32fast = { version = "1.5.1", default-features = false }
+# RSA PKCS#1 v1.5 verification for the APK Signature Scheme v2 signer.
+ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 # `flock` for the cross-process bootstrap lock.  `std` has no file locking.
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "std"] }
 # SHA-256 for the recorded content digests.
