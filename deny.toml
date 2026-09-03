@@ -64,6 +64,16 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # `webpki-roots`, which packages Mozilla's CA root store for `rustls`.
+    # CDLA-Permissive-2.0 is a permissive license for *data*: it grants
+    # unconditional rights to use, modify and share the data and imposes no
+    # copyleft, no patent-retaliation clause and no notice obligation beyond
+    # preserving the disclaimer, so it does not conflict with distributing
+    # Coffer under GPL-3.0-or-later.  It covers the root certificate list that
+    # `coffer-bootstrap` verifies Apple's content delivery network against;
+    # see that crate's `http` module for why the Mozilla bundle is used in
+    # preference to the system trust store.
+    "CDLA-Permissive-2.0",
     "GPL-3.0-or-later",
     "ISC",
     "MIT",

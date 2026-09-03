@@ -1,0 +1,33 @@
+[package]
+name = "coffer-bootstrap"
+description = "Runtime acquisition of the Apple support libraries that local anisette generation needs on Linux"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Deflate for the two archive members Coffer extracts.  `decompress_to_vec_with_limit`
+# is the only entry point used; it bounds the output buffer, which is what makes a
+# compression bomb a bounded error instead of an allocation failure.
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
+# CRC-32 verification of extracted archive members.
+crc32fast = { version = "1.5.1", default-features = false }
+# `flock` for the cross-process bootstrap lock.  `std` has no file locking.
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "std"] }
+# SHA-256 for the recorded content digests.
+sha2 = { version = "0.11.0", default-features = false }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
+# Staging directories on the same filesystem as the install root.
+tempfile = { version = "3.27.0", default-features = false }
+# Blocking HTTPS.  `default-features = false` keeps `gzip`, `brotli`, `cookies`,
+# `socks-proxy` and `native-tls` out; the `rustls` feature selects rustls with the
+# `ring` provider and Mozilla's root bundle (see `http::AppleCdnSource`).
+ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true
