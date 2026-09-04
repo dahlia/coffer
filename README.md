@@ -31,11 +31,30 @@ Windows client, but there is no corresponding Linux client.
 Coffer aims to fill that gap without becoming another independent password
 ecosystem.
 
+Coffer began with a boycott. I had been a loyal 1Password customer for almost
+fifteen years, but decided to leave after 1Password became a corporate patron
+of DHH's Omacom Foundation. I regard DHH's politics as fascist, and I did not
+want my subscription money to legitimize him or the political community around
+his work. I [explained my decision] on my personal fediverse account; the
+[original concern], [1Password's response], [reply], and [later context] are
+linked for readers who want the details.
+
+Choosing a replacement came down to Bitwarden or Apple Passwords. I chose Apple
+Passwords because it is free and already serves the Apple devices I use. Apple
+officially supports it only on its own platforms and Windows, however, so using
+it meant building the missing Linux client. That is why Coffer exists.
+
 The long-term goal is for a credential saved on an Apple device to be
 conveniently available on Linux, and eventually for changes made on Linux to
 synchronize back through iCloud as well.
 
 The name *Coffer* refers to a strongbox used for keeping valuable things safe.
+
+[explained my decision]: https://hollo.social/@hongminhee/01a06666-3550-7428-9c5d-800c805f8491
+[original concern]: https://mastodon.social/@mvsde/117194324209720681
+[1Password's response]: https://mastodon.social/@mvsde/117199806358593027
+[reply]: https://mastodon.social/@mvsde/117199871825259559
+[later context]: https://mastodon.social/@mvsde/117205476766785073
 
 
 Project principles
