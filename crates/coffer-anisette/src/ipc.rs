@@ -27,7 +27,7 @@ use crate::error::BridgeError;
 use crate::types::MAX_SECRET_BYTES;
 
 const MAGIC: &[u8; 8] = b"COFFADI\0";
-const VERSION: u16 = 2;
+pub(crate) const VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 pub(crate) const MAX_FRAME_BYTES: usize = 2 * MAX_SECRET_BYTES + 16 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024;
@@ -105,6 +105,10 @@ pub(crate) enum Response {
     },
     ProvisioningStarted(Zeroizing<Vec<u8>>),
     Error(BridgeError),
+    TerminalError {
+        first: BridgeError,
+        cleanup: Option<BridgeError>,
+    },
 }
 
 impl core::fmt::Debug for Response {
@@ -128,6 +132,11 @@ impl core::fmt::Debug for Response {
                 .finish(),
             Self::ProvisioningStarted(_) => f.write_str("ProvisioningStarted(<redacted>)"),
             Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
+            Self::TerminalError { first, cleanup } => f
+                .debug_struct("TerminalError")
+                .field("first", first)
+                .field("cleanup", cleanup)
+                .finish(),
         }
     }
 }
@@ -292,6 +301,12 @@ pub(crate) fn write_response(
             write_frame(&mut writer, Operation::StartProvisioning as u8, 0, &payload)
         }
         Response::Error(error) => write_frame(&mut writer, 0, error.code(), &[]),
+        Response::TerminalError { first, cleanup } => write_frame(
+            &mut writer,
+            0,
+            first.code(),
+            &[cleanup.map_or(0, BridgeError::code)],
+        ),
     }
 }
 
@@ -304,12 +319,22 @@ pub(crate) fn read_response(mut reader: impl Read) -> Result<Response, BridgeErr
 pub(crate) fn read_response_frame(reader: &mut impl Read) -> Result<Response, BridgeError> {
     let (kind, status, payload) = read_frame(reader)?;
     if status != 0 {
-        if kind != 0 || !payload.is_empty() {
+        if kind != 0 || payload.len() > 1 {
             return Err(BridgeError::InvalidMessage);
         }
-        return BridgeError::from_code(status)
-            .map(Response::Error)
-            .ok_or(BridgeError::InvalidMessage);
+        let first = BridgeError::from_code(status).ok_or(BridgeError::InvalidMessage)?;
+        return match payload.as_slice() {
+            [] => Ok(Response::Error(first)),
+            [0] => Ok(Response::TerminalError {
+                first,
+                cleanup: None,
+            }),
+            [code] => Ok(Response::TerminalError {
+                first,
+                cleanup: Some(BridgeError::from_code(*code).ok_or(BridgeError::InvalidMessage)?),
+            }),
+            _ => Err(BridgeError::InvalidMessage),
+        };
     }
     let operation = Operation::from_code(kind).ok_or(BridgeError::InvalidMessage)?;
     match operation {
@@ -616,7 +641,7 @@ mod tests {
             let request = request(operation);
             let mut encoded = Vec::new();
             write_request(&mut encoded, &request).expect("encode");
-            let mut expected = b"COFFADI\0\0\x02".to_vec();
+            let mut expected = b"COFFADI\0\0\x03".to_vec();
             expected.extend_from_slice(&[code, 0, 0, 0, 0, 0]);
             expected.extend_from_slice(b"\0\x08/library");
             expected.extend_from_slice(b"\0\x15/data/coffer/anisette");
@@ -656,7 +681,7 @@ mod tests {
         write_transaction_command(&mut encoded, &finish).expect("encode");
         assert_eq!(
             encoded,
-            b"COFFADI\0\0\x02\x40\0\0\0\0\r\0\0\0\x03ptm\0\0\0\x02tk"
+            b"COFFADI\0\0\x03\x40\0\0\0\0\r\0\0\0\x03ptm\0\0\0\x02tk"
         );
         assert!(matches!(
             read_transaction_command(&mut IoCursor::new(encoded)).expect("decode"),
@@ -665,7 +690,33 @@ mod tests {
         assert_eq!(format!("{finish:?}"), "Finish(<redacted>)");
         let mut cancel = Vec::new();
         write_transaction_command(&mut cancel, &TransactionCommand::Cancel).expect("cancel");
-        assert_eq!(cancel, b"COFFADI\0\0\x02\x41\0\0\0\0\0");
+        assert_eq!(cancel, b"COFFADI\0\0\x03\x41\0\0\0\0\0");
+    }
+
+    #[test]
+    fn terminal_error_frame_preserves_cleanup_separately() {
+        for (cleanup, code) in [
+            (None, 0),
+            (Some(BridgeError::DestroyProvisioningFailed), 17),
+        ] {
+            let response = Response::TerminalError {
+                first: BridgeError::EndProvisioningFailed,
+                cleanup,
+            };
+            let mut encoded = Vec::new();
+            write_response(&mut encoded, &response).expect("encode terminal error");
+            assert_eq!(
+                encoded,
+                [b"COFFADI\0\0\x03\0\x10\0\0\0\x01".as_slice(), &[code]].concat()
+            );
+            assert!(matches!(
+                read_response(IoCursor::new(encoded)).expect("decode terminal error"),
+                Response::TerminalError {
+                    first: BridgeError::EndProvisioningFailed,
+                    cleanup: observed,
+                } if observed == cleanup
+            ));
+        }
     }
 
     #[test]

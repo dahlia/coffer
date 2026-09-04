@@ -325,7 +325,32 @@ impl HelperClient {
         spim: SecretBytes,
     ) -> Result<ProvisioningSession, BridgeError> {
         let deadline = self.deadline()?;
-        let prepared = store.prepare(deadline)?;
+        self.start_provisioning_at(libraries, store, ds_id, android_id, spim, deadline)
+    }
+
+    pub(crate) fn start_provisioning_until(
+        &self,
+        libraries: &VerifiedLibraryPaths,
+        store: &ProvisioningStore,
+        ds_id: DirectoryServiceId,
+        android_id: &AndroidId,
+        spim: SecretBytes,
+        outer_deadline: Instant,
+    ) -> Result<ProvisioningSession, BridgeError> {
+        let deadline = self.deadline()?.min(outer_deadline);
+        self.start_provisioning_at(libraries, store, ds_id, android_id, spim, deadline)
+    }
+
+    fn start_provisioning_at(
+        &self,
+        libraries: &VerifiedLibraryPaths,
+        store: &ProvisioningStore,
+        ds_id: DirectoryServiceId,
+        android_id: &AndroidId,
+        spim: SecretBytes,
+        deadline: Instant,
+    ) -> Result<ProvisioningSession, BridgeError> {
+        let prepared = store.prepare_for_reprovision(deadline)?;
         let request = request(
             Operation::StartProvisioning,
             libraries,
@@ -395,6 +420,11 @@ impl HelperClient {
     }
 }
 
+pub(crate) struct NativeTerminalError {
+    pub(crate) first: BridgeError,
+    pub(crate) cleanup: Option<BridgeError>,
+}
+
 impl core::fmt::Debug for HelperClient {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HelperClient")
@@ -438,26 +468,67 @@ impl ProvisioningSession {
     ///
     /// A failed end is terminal.  The helper performs one destroy cleanup and
     /// the previous active generation remains selected.
-    pub fn finish(mut self, ptm: SecretBytes, tk: SecretBytes) -> Result<(), BridgeError> {
-        let process = self.process.as_mut().ok_or(BridgeError::HelperFailed)?;
-        process.send_command(
-            &TransactionCommand::Finish {
-                ptm: ptm.into_zeroizing(),
-                tk: tk.into_zeroizing(),
-            },
-            true,
-        )?;
-        match process.read_response(true)? {
+    pub fn finish(self, ptm: SecretBytes, tk: SecretBytes) -> Result<(), BridgeError> {
+        self.finish_with_cleanup(ptm, tk)
+            .map_err(|error| error.first)
+    }
+
+    pub(crate) fn finish_with_cleanup(
+        mut self,
+        ptm: SecretBytes,
+        tk: SecretBytes,
+    ) -> Result<(), NativeTerminalError> {
+        let process = self.process.as_mut().ok_or(NativeTerminalError {
+            first: BridgeError::HelperFailed,
+            cleanup: None,
+        })?;
+        process
+            .send_command(
+                &TransactionCommand::Finish {
+                    ptm: ptm.into_zeroizing(),
+                    tk: tk.into_zeroizing(),
+                },
+                true,
+            )
+            .map_err(|first| NativeTerminalError {
+                first,
+                cleanup: None,
+            })?;
+        match process
+            .read_response(true)
+            .map_err(|first| NativeTerminalError {
+                first,
+                cleanup: None,
+            })? {
             Response::Unit(Operation::EndProvisioning) => {
                 self.process.take();
                 self.cpim.take();
                 self.prepared
                     .take()
-                    .ok_or(BridgeError::StateFailed)?
+                    .ok_or(NativeTerminalError {
+                        first: BridgeError::StateFailed,
+                        cleanup: None,
+                    })?
                     .publish()
+                    .map_err(|first| NativeTerminalError {
+                        first,
+                        cleanup: None,
+                    })
             }
-            Response::Error(error) => Err(error),
-            _ => Err(BridgeError::InvalidMessage),
+            Response::TerminalError { first, cleanup } => {
+                self.process.take();
+                self.cpim.take();
+                self.prepared.take();
+                Err(NativeTerminalError { first, cleanup })
+            }
+            Response::Error(first) => Err(NativeTerminalError {
+                first,
+                cleanup: None,
+            }),
+            _ => Err(NativeTerminalError {
+                first: BridgeError::InvalidMessage,
+                cleanup: None,
+            }),
         }
     }
 

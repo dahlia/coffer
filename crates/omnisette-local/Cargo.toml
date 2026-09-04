@@ -1,0 +1,23 @@
+# Derived from SideStore apple-private-apis omnisette/Cargo.toml.
+# Upstream repository: https://github.com/SideStore/apple-private-apis
+# Upstream commit: 03beb1aa42991ccdad6214dee77e72282bef461f
+# License: MPL-2.0. Modified by the Coffer project in 2026 to retain only the
+# loader-neutral local composition layer and remove every feature and transport.
+
+[package]
+name = "omnisette-local"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MPL-2.0"
+repository = "https://github.com/SideStore/apple-private-apis"
+publish = false
+
+[dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.11.0", default-features = false }
+thiserror = "2.0.17"
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -4,6 +4,8 @@ members = [
     "crates/coffer-bootstrap",
     "crates/coffer-protocol",
     "crates/coffer-service",
+    "crates/omnisette-local",
+    "tools/omnisette-check",
 ]
 resolver = "3"
 

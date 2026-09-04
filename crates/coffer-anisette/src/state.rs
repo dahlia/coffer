@@ -28,7 +28,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use coffer_bootstrap::BootstrapPaths;
+use coffer_bootstrap::{BootstrapPaths, InstalledLibraries};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -48,10 +48,14 @@ const IDENTIFIER_FILE: &str = "identifier";
 const LOCK_FILE: &str = "provisioning.lock";
 const GENERATIONS_DIRECTORY: &str = "generations";
 const STAGING_DIRECTORY: &str = "staging";
+const BINDINGS_DIRECTORY: &str = "bindings";
+const IDENTIFIER_SCHEMA: u16 = 1;
+const OMNISETTE_UPSTREAM_COMMIT: &str = "03beb1aa42991ccdad6214dee77e72282bef461f";
 
 /// XDG-bound storage for native provisioning generations.
 pub struct ProvisioningStore {
     root: PathBuf,
+    binding: Option<String>,
 }
 
 impl ProvisioningStore {
@@ -72,7 +76,29 @@ impl ProvisioningStore {
         if !root.is_absolute() {
             return Err(BridgeError::InvalidPath);
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            binding: None,
+        })
+    }
+
+    /// Binds provisioning generations to one verified support-library install.
+    ///
+    /// The binding includes the bootstrap install identifier, archive and
+    /// library hashes, helper protocol version, selected upstream revision,
+    /// and identifier schema. Existing state with a different or missing
+    /// binding is rejected instead of being used or reprovisioned implicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::InvalidPath`] for an unsafe XDG layout.
+    pub fn from_installation(
+        paths: &BootstrapPaths,
+        installation: &InstalledLibraries,
+    ) -> Result<Self, BridgeError> {
+        let mut store = Self::from_paths(paths)?;
+        store.binding = Some(binding_for(installation));
+        Ok(store)
     }
 
     /// Loads or atomically creates the installation's 16-byte identifier.
@@ -99,6 +125,21 @@ impl ProvisioningStore {
     }
 
     pub(crate) fn prepare(&self, deadline: Instant) -> Result<PreparedGeneration, BridgeError> {
+        self.prepare_inner(deadline, false)
+    }
+
+    pub(crate) fn prepare_for_reprovision(
+        &self,
+        deadline: Instant,
+    ) -> Result<PreparedGeneration, BridgeError> {
+        self.prepare_inner(deadline, true)
+    }
+
+    fn prepare_inner(
+        &self,
+        deadline: Instant,
+        allow_empty_reprovision: bool,
+    ) -> Result<PreparedGeneration, BridgeError> {
         check_deadline(deadline)?;
         let lock = self.lock_until(Some(deadline))?;
         let staging_root = self.root.join(STAGING_DIRECTORY);
@@ -108,6 +149,15 @@ impl ProvisioningStore {
         check_deadline(deadline)?;
         clean_staging(&staging_root, deadline)?;
         let active = active_generation(&self.root, Some(deadline))?;
+        let copy_active = match (active.as_ref(), self.binding.as_ref()) {
+            (Some(active), Some(binding)) => match validate_binding(&self.root, active, binding) {
+                Ok(()) => true,
+                Err(BridgeError::StateIncompatible) if allow_empty_reprovision => false,
+                Err(error) => return Err(error),
+            },
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
         let active_name = active
             .as_ref()
             .and_then(|path| path.file_name())
@@ -123,7 +173,7 @@ impl ProvisioningStore {
             .map_err(|_| BridgeError::StateFailed)?;
         let path = directory.path().to_owned();
         validate_staging_path(&self.root, &path)?;
-        if let Some(active) = active {
+        if copy_active && let Some(active) = active {
             copy_tree(&active, &path, deadline)?;
         }
         check_deadline(deadline)?;
@@ -139,6 +189,7 @@ impl ProvisioningStore {
             capability,
             deadline,
             lease,
+            binding: self.binding.clone(),
         })
     }
 
@@ -193,6 +244,68 @@ impl ProvisioningStore {
         validate_private_directory(&self.root)?;
         Ok(StateLock(file))
     }
+}
+
+fn binding_for(installation: &InstalledLibraries) -> String {
+    let metadata = installation.metadata();
+    let mut hasher = Sha256::new();
+    for (path, file) in &metadata.files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.sha256.as_bytes());
+        hasher.update([0]);
+    }
+    let file_hashes = encode_hex_lower(hasher.finalize());
+    format!(
+        "schema=1\ninstall={}\narchive={}\nlibraries={}\nhelper={}\nupstream={}\nidentifier={}\n",
+        installation.install_id(),
+        metadata.source.archive_sha256,
+        file_hashes,
+        crate::ipc::VERSION,
+        OMNISETTE_UPSTREAM_COMMIT,
+        IDENTIFIER_SCHEMA,
+    )
+}
+
+fn validate_binding(root: &Path, active: &Path, expected: &str) -> Result<(), BridgeError> {
+    let name = active
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| is_generation_name(name))
+        .ok_or(BridgeError::StateCorrupt)?;
+    let bindings = root.join(BINDINGS_DIRECTORY);
+    let directory = match open_existing_private_directory(&bindings) {
+        Ok(directory) => directory,
+        Err(BridgeError::StateMissing) => return Err(BridgeError::StateIncompatible),
+        Err(error) => return Err(error),
+    };
+    let file = match open_regular_file_at(&directory, name) {
+        Ok(file) => file,
+        Err(BridgeError::StateMissing) => return Err(BridgeError::StateIncompatible),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::with_capacity(1025);
+    file.take(1025)
+        .read_to_end(&mut bytes)
+        .map_err(|_| BridgeError::StateFailed)?;
+    if bytes.len() > 1024 {
+        return Err(BridgeError::StateCorrupt);
+    }
+    if bytes != expected.as_bytes() {
+        return Err(BridgeError::StateIncompatible);
+    }
+    Ok(())
+}
+
+fn encode_hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn read_identifier(root: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, BridgeError> {
@@ -290,6 +403,7 @@ pub(crate) struct PreparedGeneration {
     capability: OwnedFd,
     deadline: Instant,
     lease: Arc<Mutex<GenerationLease>>,
+    binding: Option<String>,
 }
 
 pub(crate) struct GenerationLease {
@@ -383,6 +497,11 @@ impl PreparedGeneration {
         // armed and removes the secret-bearing staging tree automatically.
         lease.directory.take();
         sync_directory(target.parent().ok_or(BridgeError::StateFailed)?)?;
+        if let Some(binding) = self.binding.as_ref() {
+            let bindings = self.root.join(BINDINGS_DIRECTORY);
+            create_private_directory(&bindings)?;
+            write_atomic(&bindings, &basename, binding.as_bytes())?;
+        }
         validate_generation_set(&self.root, Some(self.deadline))?;
         check_deadline(self.deadline)?;
         write_atomic(&self.root, ACTIVE_FILE, basename.as_bytes())?;
@@ -730,7 +849,44 @@ fn prune_generations(
         }
         fs::remove_dir_all(path).map_err(|_| BridgeError::StateFailed)?;
     }
-    sync_directory(&generations)
+    sync_directory(&generations)?;
+    prune_bindings(root, deadline)
+}
+
+fn prune_bindings(root: &Path, deadline: Option<Instant>) -> Result<(), BridgeError> {
+    let bindings = root.join(BINDINGS_DIRECTORY);
+    match open_existing_private_directory(&bindings) {
+        Ok(_) => {}
+        Err(BridgeError::StateMissing) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    for entry in fs::read_dir(&bindings).map_err(|_| BridgeError::StateFailed)? {
+        check_optional_deadline(deadline)?;
+        let entry = entry.map_err(|_| BridgeError::StateFailed)?;
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            return Err(BridgeError::StateCorrupt);
+        };
+        let file_type = entry.file_type().map_err(|_| BridgeError::StateFailed)?;
+        if name_text.starts_with(".partial-") {
+            if file_type.is_symlink() || !file_type.is_file() {
+                return Err(BridgeError::InvalidPath);
+            }
+            let metadata = entry.metadata().map_err(|_| BridgeError::StateFailed)?;
+            validate_regular_metadata(&metadata)?;
+            fs::remove_file(entry.path()).map_err(|_| BridgeError::StateFailed)?;
+            continue;
+        }
+        if !is_generation_name(name_text) || file_type.is_symlink() || !file_type.is_file() {
+            return Err(BridgeError::InvalidPath);
+        }
+        let metadata = entry.metadata().map_err(|_| BridgeError::StateFailed)?;
+        validate_regular_metadata(&metadata)?;
+        if !root.join(GENERATIONS_DIRECTORY).join(&name).is_dir() {
+            fs::remove_file(entry.path()).map_err(|_| BridgeError::StateFailed)?;
+        }
+    }
+    sync_directory(&bindings)
 }
 
 fn validate_generation_set(
@@ -1051,6 +1207,12 @@ mod tests {
         ProvisioningStore::from_paths(&BootstrapPaths::rooted_at(root.path())).expect("store")
     }
 
+    fn bound_store(root: &tempfile::TempDir, binding: &str) -> ProvisioningStore {
+        let mut store = store(root);
+        store.binding = Some(binding.to_owned());
+        store
+    }
+
     fn prepare(store: &ProvisioningStore) -> Result<PreparedGeneration, BridgeError> {
         store.prepare(Instant::now() + Duration::from_secs(5))
     }
@@ -1215,6 +1377,102 @@ mod tests {
             .expect("old generation"),
             b"old"
         );
+    }
+
+    #[test]
+    fn bound_state_requires_an_exact_private_generation_binding() {
+        let root = tempfile::tempdir().expect("root");
+        let store = bound_store(&root, "binding-v1");
+        prepare(&store)
+            .expect("prepare")
+            .publish()
+            .expect("publish");
+        drop(prepare(&store).expect("matching binding"));
+
+        let active = fs::read_to_string(store.root.join(ACTIVE_FILE)).expect("active");
+        let binding_path = store.root.join(BINDINGS_DIRECTORY).join(active);
+        let mismatched = bound_store(&root, "binding-v2");
+        assert_eq!(
+            prepare(&mismatched).err(),
+            Some(BridgeError::StateIncompatible)
+        );
+
+        fs::remove_file(&binding_path).expect("remove binding");
+        assert_eq!(prepare(&store).err(), Some(BridgeError::StateIncompatible));
+        fs::write(&binding_path, vec![b'x'; 1025]).expect("oversized binding");
+        fs::set_permissions(&binding_path, Permissions::from_mode(FILE_MODE)).expect("mode");
+        assert_eq!(prepare(&store).err(), Some(BridgeError::StateCorrupt));
+    }
+
+    #[test]
+    fn explicit_reprovision_starts_empty_and_rebinds_incompatible_state() {
+        let root = tempfile::tempdir().expect("root");
+        let old = bound_store(&root, "binding-v1");
+        let generation = prepare(&old).expect("old generation");
+        fs::write(generation.path().join("old-secret"), b"opaque").expect("old state");
+        fs::set_permissions(
+            generation.path().join("old-secret"),
+            Permissions::from_mode(FILE_MODE),
+        )
+        .expect("private state");
+        generation.publish().expect("publish old state");
+
+        let new = bound_store(&root, "binding-v2");
+        assert_eq!(prepare(&new).err(), Some(BridgeError::StateIncompatible));
+        let replacement = new
+            .prepare_for_reprovision(Instant::now() + Duration::from_secs(5))
+            .expect("explicit empty replacement");
+        assert!(!replacement.path().join("old-secret").exists());
+        fs::write(replacement.path().join("new-secret"), b"opaque").expect("new state");
+        fs::set_permissions(
+            replacement.path().join("new-secret"),
+            Permissions::from_mode(FILE_MODE),
+        )
+        .expect("private state");
+        replacement.publish().expect("publish replacement");
+        drop(prepare(&new).expect("new binding is usable"));
+    }
+
+    #[test]
+    fn generation_pruning_also_prunes_stale_bindings() {
+        let root = tempfile::tempdir().expect("root");
+        let store = bound_store(&root, "binding-v1");
+        for _ in 0..3 {
+            prepare(&store)
+                .expect("prepare")
+                .publish()
+                .expect("publish");
+        }
+        assert_eq!(
+            fs::read_dir(store.root.join(GENERATIONS_DIRECTORY))
+                .expect("generations")
+                .count(),
+            2
+        );
+        assert_eq!(
+            fs::read_dir(store.root.join(BINDINGS_DIRECTORY))
+                .expect("bindings")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn generation_pruning_removes_interrupted_binding_temporary_files() {
+        let root = tempfile::tempdir().expect("root");
+        let store = bound_store(&root, "binding-v1");
+        prepare(&store)
+            .expect("prepare")
+            .publish()
+            .expect("publish");
+        let partial = store
+            .root
+            .join(BINDINGS_DIRECTORY)
+            .join(".partial-interrupted");
+        fs::write(&partial, b"incomplete").expect("partial binding");
+        fs::set_permissions(&partial, Permissions::from_mode(FILE_MODE)).expect("private mode");
+        drop(prepare(&store).expect("partial binding is pruned"));
+        assert!(!partial.exists());
     }
 
     #[test]

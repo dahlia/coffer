@@ -106,6 +106,8 @@ pub enum BridgeError {
     StateCorrupt,
     /// Durable provisioning state could not be staged or published.
     StateFailed,
+    /// Durable provisioning state belongs to a different verified runtime.
+    StateIncompatible,
     /// The helper exceeded its single invocation deadline.
     TimedOut,
     /// The helper terminated by signal, abort, or an abort-only shim.
@@ -136,7 +138,10 @@ impl BridgeError {
             Self::OtpFailed => Stage::Otp,
             Self::SynchronizeFailed => Stage::Synchronize,
             Self::EraseProvisioningFailed => Stage::EraseProvisioning,
-            Self::StateMissing | Self::StateCorrupt | Self::StateFailed => Stage::State,
+            Self::StateMissing
+            | Self::StateCorrupt
+            | Self::StateFailed
+            | Self::StateIncompatible => Stage::State,
             Self::TimedOut | Self::HelperCrashed | Self::HelperFailed | Self::ProcessIo => {
                 Stage::Process
             }
@@ -168,6 +173,7 @@ impl BridgeError {
             Self::StateMissing => 21,
             Self::StateCorrupt => 22,
             Self::StateFailed => 23,
+            Self::StateIncompatible => 24,
         }
     }
 
@@ -196,6 +202,7 @@ impl BridgeError {
             21 => Self::StateMissing,
             22 => Self::StateCorrupt,
             23 => Self::StateFailed,
+            24 => Self::StateIncompatible,
             _ => return None,
         })
     }

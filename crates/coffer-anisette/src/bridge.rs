@@ -392,10 +392,12 @@ fn handle_provisioning(
     stdout.flush().map_err(|_| BridgeError::ProcessIo)?;
     let command = read_transaction_command(stdin);
     let response = match command {
-        Ok(TransactionCommand::Finish { ptm, tk }) => match session.finish(&ptm, &tk) {
-            Ok(()) => Response::Unit(Operation::EndProvisioning),
-            Err(error) => Response::Error(error),
-        },
+        Ok(TransactionCommand::Finish { ptm, tk }) => {
+            match session.finish_with_cleanup(&ptm, &tk) {
+                Ok(()) => Response::Unit(Operation::EndProvisioning),
+                Err((first, cleanup)) => Response::TerminalError { first, cleanup },
+            }
+        }
         Ok(TransactionCommand::Cancel) => match session.destroy() {
             Ok(()) => Response::Unit(Operation::DestroyProvisioning),
             Err(error) => Response::Error(error),
@@ -475,9 +477,14 @@ struct NativeProvisioningSession {
 
 impl NativeProvisioningSession {
     #[allow(unsafe_code)]
-    fn finish(mut self, ptm: &[u8], tk: &[u8]) -> Result<(), BridgeError> {
-        let ptm_length = u32::try_from(ptm.len()).map_err(|_| BridgeError::InvalidMessage)?;
-        let tk_length = u32::try_from(tk.len()).map_err(|_| BridgeError::InvalidMessage)?;
+    fn finish_with_cleanup(
+        mut self,
+        ptm: &[u8],
+        tk: &[u8],
+    ) -> Result<(), (BridgeError, Option<BridgeError>)> {
+        let ptm_length =
+            u32::try_from(ptm.len()).map_err(|_| (BridgeError::InvalidMessage, None))?;
+        let tk_length = u32::try_from(tk.len()).map_err(|_| (BridgeError::InvalidMessage, None))?;
         // SAFETY: the move-only owner proves this handle has not been ended or
         // destroyed.  Both bounded input slices remain live for the call.
         let status = unsafe {
@@ -493,9 +500,15 @@ impl NativeProvisioningSession {
             self.active = false;
             Ok(())
         } else {
-            // Drop performs the one allowed destroy cleanup.  It never repeats
-            // the failed end operation.
-            Err(BridgeError::EndProvisioningFailed)
+            self.active = false;
+            // SAFETY: ownership is still exclusive and the active flag is
+            // cleared before the exactly-once best-effort cleanup.
+            let cleanup = if unsafe { (self.destroy)(self.handle) } == 0 {
+                None
+            } else {
+                Some(BridgeError::DestroyProvisioningFailed)
+            };
+            Err((BridgeError::EndProvisioningFailed, cleanup))
         }
     }
 
@@ -2560,7 +2573,7 @@ mod tests {
         let entries = fake_entries();
         let (cpim, session) = start_native_session(&entries, -2, b"spim").expect("start");
         assert_eq!(&*cpim, b"cpim");
-        session.finish(b"ptm", b"tk").expect("finish");
+        session.finish_with_cleanup(b"ptm", b"tk").expect("finish");
         assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(END_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 0);
@@ -2573,20 +2586,31 @@ mod tests {
         END_STATUS.store(1, Ordering::SeqCst);
         let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
         assert_eq!(
-            session.finish(b"ptm", b"tk"),
-            Err(BridgeError::EndProvisioningFailed)
+            session.finish_with_cleanup(b"ptm", b"tk"),
+            Err((BridgeError::EndProvisioningFailed, None))
         );
         assert_eq!(END_CALLS.load(Ordering::SeqCst), 2);
         assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 2);
 
-        END_STATUS.store(0, Ordering::SeqCst);
         DESTROY_STATUS.store(1, Ordering::SeqCst);
+        let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
+        assert_eq!(
+            session.finish_with_cleanup(b"ptm", b"tk"),
+            Err((
+                BridgeError::EndProvisioningFailed,
+                Some(BridgeError::DestroyProvisioningFailed)
+            ))
+        );
+        assert_eq!(END_CALLS.load(Ordering::SeqCst), 3);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 3);
+
+        END_STATUS.store(0, Ordering::SeqCst);
         let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
         assert_eq!(
             session.destroy(),
             Err(BridgeError::DestroyProvisioningFailed)
         );
-        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 3);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 4);
     }
 
     #[test]

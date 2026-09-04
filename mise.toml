@@ -44,9 +44,21 @@ run = [
   "zizmor --offline .github/workflows",
 ]
 
+[tasks.check-omnisette]
+description = "Verify the local-only anisette graph and vendored provenance"
+wait_for = ["clippy"]
+run = "cargo run --quiet --locked --offline -p coffer-omnisette-check"
+
+[tasks.verify-omnisette-upstream]
+description = "Reproduce the vendored omnisette subtree from pinned upstream"
+# This explicit maintainer check fetches the immutable upstream commit. It is
+# intentionally outside `check` and `ci`, which must retain their existing
+# offline source/provenance verification behavior.
+run = "bash tools/import-omnisette-local.sh"
+
 [tasks.check]
 description = "Fast static verification for frequent use and pre-commit hooks"
-depends = ["fmt-check", "clippy", "lint-actions"]
+depends = ["fmt-check", "clippy", "lint-actions", "check-omnisette"]
 
 # Build, test, and documentation ----------------------------------------------
 

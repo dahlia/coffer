@@ -425,6 +425,16 @@ If MPL-covered source is vendored or modified, preserve its required notices and
 license treatment. Do not silently relicense upstream files merely because the
 larger Coffer work is GPL-3.0-or-later.
 
+The narrow `omnisette-local` subtree is vendored because the upstream package's
+default graph includes remote anisette providers and a loader without a usable
+license grant, while its local-only feature combination does not compile. The
+checked subtree removes those components structurally and records every source
+and patch hash in *crates/omnisette-local/UPSTREAM.toml*. Whenever that subtree,
+its patch, or its provenance record changes, run
+`mise run verify-omnisette-upstream`. This opt-in task fetches only the pinned
+upstream commit and is intentionally excluded from `mise run check` and
+`mise run ci`; their provenance check remains offline.
+
 [`apple-private-apis`]: https://github.com/SideStore/apple-private-apis
 
 ### Reference-only implementations

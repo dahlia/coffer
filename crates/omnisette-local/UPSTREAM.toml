@@ -1,0 +1,53 @@
+# Immutable provenance for the MPL-2.0 local composition subtree.
+repository = "https://github.com/SideStore/apple-private-apis"
+commit = "03beb1aa42991ccdad6214dee77e72282bef461f"
+tree = "7ef39962ce9a4f041ce1ad6f4915ea2e532a3ee3"
+package = "omnisette"
+version = "0.1.0"
+selected_archive_sha256 = "bb1154bb7d2af7a9b38a223a03d4e807694ec97ca0390fcca5be542d2cd51600"
+patch = "../../tools/omnisette-local.patch"
+patch_sha256 = "e27436272e0dcb99255d1da7c00934ab50e1f33990ae62a504fbf20f73d62857"
+vendoring_rationale = "The upstream package cannot provide a compilable loader-free local-only graph and otherwise includes remote providers and an unlicensed loader. Reproduce this reviewed subtree with `mise run verify-omnisette-upstream` whenever its source, patch, or provenance changes; the network task is intentionally outside check and CI."
+
+modifications = [
+    "replace the manifest with a private zero-feature local-only package",
+    "remove every platform loader, transport, runtime, remote provider, and fallback",
+    "retain a narrowed helper-neutral AdiProxy trait with owning secret/session values",
+    "make header retrieval fail with NotProvisioned and never provision or retry",
+    "derive identity fields deterministically from caller-owned random bytes",
+]
+
+[[files]]
+original = "LICENSE"
+original_sha256 = "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+vendored = "LICENSE"
+final_sha256 = "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+modified = false
+
+[[files]]
+original = "omnisette/Cargo.toml"
+original_sha256 = "24b20eb7e8e7070b6c62adfadf56c8fbe1668ac91c23d2e7e466911e93e65833"
+vendored = "Cargo.toml"
+final_sha256 = "1125b532c0a5a56f9c2a78b4d8b2f42c607d384a08c004e1e47b0075b48f35c3"
+modified = true
+
+[[files]]
+original = "omnisette/src/lib.rs"
+original_sha256 = "dc138772d9f680d48140b25c7e8097ef09ba3fc0aa1dcf91ee2cb8f444f87aa1"
+vendored = "src/lib.rs"
+final_sha256 = "d78d24868413de5e91855dde866651eb3c94f4d0edb66d3516829d84f4fa690c"
+modified = true
+
+[[files]]
+original = "omnisette/src/adi_proxy.rs"
+original_sha256 = "0bf29dbc2488d210423db82f0454482bd681f7a5d8e7537c20666dfed1941b11"
+vendored = "src/adi_proxy.rs"
+final_sha256 = "54d49e82c895ab599b06f37b0029ce0852d8de7d68bd2413f7247257fecdc55e"
+modified = true
+
+[[files]]
+original = "omnisette/src/anisette_headers_provider.rs"
+original_sha256 = "ac722a884cbc0134902960bf11eb044e256cff7f3b008430704090ba972dd149"
+vendored = "src/anisette_headers_provider.rs"
+final_sha256 = "2a223a214d7ae531dde984e84a6e9c857d6b41b066ef05197c4fb9c35b84fff9"
+modified = true

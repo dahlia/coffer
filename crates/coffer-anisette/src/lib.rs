@@ -49,6 +49,8 @@ mod bridge;
 mod client;
 mod error;
 mod ipc;
+mod provider;
+mod provision;
 mod sandbox;
 mod state;
 mod types;
@@ -56,6 +58,11 @@ mod types;
 pub use bridge::{AdiOwnedBuffer, PropertyKey};
 pub use client::{HelperClient, ProvisioningSession, SmokeResult, VerifiedLibraryPaths};
 pub use error::{BridgeError, Stage};
+pub use provider::{AnisetteContext, CofferAnisetteError, CofferAnisetteProvider};
+pub use provision::{
+    ExplicitProvisioningRequest, ProvisioningCoordinator, ProvisioningError, ProvisioningErrorKind,
+    ProvisioningReceipt, ProvisioningStage,
+};
 pub use state::{DeviceIdentifiers, ProvisioningStore};
 pub use types::{
     AndroidId, DirectoryServiceId, OtpMaterial, SecretBytes, SecretString, SynchronizeMaterial,
