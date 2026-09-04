@@ -5,6 +5,7 @@ members = [
     "crates/coffer-protocol",
     "crates/coffer-service",
     "crates/omnisette-local",
+    "tools/coffer-live-auth",
     "tools/omnisette-check",
 ]
 resolver = "3"

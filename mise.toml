@@ -82,6 +82,22 @@ wait_for = ["test"]
 env = { RUSTDOCFLAGS = "-D warnings" }
 run = "cargo doc --workspace --no-deps --document-private-items --locked"
 
+# Live Apple Account harness --------------------------------------------------
+
+# Interactive and developer-only.  It performs one live Apple Account
+# authentication against gsa.apple.com, may download the Apple support
+# libraries and provision local anisette, and writes one item to the desktop
+# Secret Service.  It reads the account name, password, and verification code
+# from the controlling terminal only; nothing passes through the shell.  It is
+# deliberately absent from `check`, `test`, and `ci`.  The helper executable is
+# built in the same graph first so the harness can locate it beside itself.
+[tasks.test-live-auth]
+description = "Run the interactive live Apple Account authentication harness"
+run = [
+  "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-auth",
+  "cargo run --quiet --locked -p coffer-live-auth --bin coffer-live-auth",
+]
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

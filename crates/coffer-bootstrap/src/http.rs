@@ -114,6 +114,11 @@ impl AppleCdnSource {
             .max_redirects(0)
             .max_redirects_will_error(true)
             .http_status_as_error(true)
+            // Never route through a proxy, whatever `HTTPS_PROXY` and friends
+            // say: the certificate check below is meant to reach Apple's host
+            // directly, and an intermediary from the environment is not part
+            // of the reviewed transport policy.
+            .proxy(None)
             .user_agent(concat!("coffer-bootstrap/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_recv_response(Some(RESPONSE_TIMEOUT))
@@ -278,5 +283,15 @@ mod tests {
         // first download.
         let _ = AppleCdnSource::default();
         let _ = AppleCdnSource::new();
+    }
+
+    #[test]
+    fn the_downloader_ignores_proxy_environment_variables() {
+        // `ureq` fills the proxy from `HTTPS_PROXY`/`ALL_PROXY` by default;
+        // the explicit `proxy(None)` must win regardless of the environment
+        // this test happens to run in.
+        let source = AppleCdnSource::new();
+        assert!(source.agent.config().proxy().is_none());
+        assert_eq!(source.agent.config().max_redirects(), 0);
     }
 }

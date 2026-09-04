@@ -1,0 +1,48 @@
+[package]
+name = "coffer-live-auth"
+description = "Developer-only interactive harness that exercises live Apple Account authentication once, end to end"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "coffer-live-auth"
+path = "src/main.rs"
+
+[dependencies]
+coffer-anisette = { path = "../../crates/coffer-anisette" }
+coffer-bootstrap = { path = "../../crates/coffer-bootstrap" }
+coffer-protocol = { path = "../../crates/coffer-protocol" }
+coffer-service = { path = "../../crates/coffer-service" }
+# Drives the protocol, anisette, and Secret Service futures from a plain
+# synchronous binary.  zbus runs its own executor thread and async-io drives
+# its reactor on a background thread, so a parked-thread `block_on` suffices.
+futures-lite = { version = "2.6.1", default-features = false, features = ["std"] }
+# `termios` turns terminal echo off for the hidden prompts, `rand` is the
+# `getrandom(2)` system call behind the entropy source, `fs` gives the
+# descriptor-relative `openat`/`linkat` calls the slot store is built on, and
+# `pty` and `process` serve the terminal-mode regression tests (a real
+# pseudo-terminal and `kill(2)` on a child).  Already in the graph through
+# `coffer-bootstrap`; no new crate.
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "pty", "rand", "std", "termios"] }
+# Safe registration of SIGINT/SIGTERM/SIGHUP flag handlers so that a signal
+# arriving during a hidden prompt is acted on only after the terminal mode
+# has been restored.  Pinned exactly; default features (channel, iterator)
+# are unused and disabled.  MIT OR Apache-2.0.
+signal-hook = { version = "=0.4.4", default-features = false }
+# Blocking HTTPS for the GSA transport with the same policy `coffer-anisette`
+# and `coffer-bootstrap` use: rustls with Mozilla's roots, no redirects, no
+# proxy, one bounded exchange per call.
+ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+zeroize = "1.9.0"
+
+[dev-dependencies]
+plist = { version = "1.10.0", default-features = false }
+tempfile = { version = "3.27.0", default-features = false }
+
+[lints]
+workspace = true
