@@ -38,8 +38,24 @@ pub enum Stage {
     LoadCoreAdi,
     /// Setting the disposable provisioning directory.
     SetProvisioningPath,
+    /// Setting ADI's fixed-width Android identifier.
+    SetAndroidId,
     /// Querying provisioned state.
     QueryProvisioned,
+    /// Starting a native provisioning session.
+    StartProvisioning,
+    /// Ending a native provisioning session.
+    EndProvisioning,
+    /// Destroying a native provisioning session.
+    DestroyProvisioning,
+    /// Requesting a native one-time password.
+    Otp,
+    /// Synchronizing native provisioning material.
+    Synchronize,
+    /// Erasing native provisioning state.
+    EraseProvisioning,
+    /// Validating, staging, or publishing durable provisioning state.
+    State,
     /// Waiting for the helper process.
     Process,
 }
@@ -70,6 +86,26 @@ pub enum BridgeError {
     CoreAdiLoadFailed,
     /// The provisioning-path setter returned a nonzero status.
     ProvisioningPathFailed,
+    /// The Android-identifier setter returned a nonzero status.
+    SetAndroidIdFailed,
+    /// Native provisioning start returned a nonzero status.
+    StartProvisioningFailed,
+    /// Native provisioning end returned a nonzero status.
+    EndProvisioningFailed,
+    /// Native provisioning-session destruction returned a nonzero status.
+    DestroyProvisioningFailed,
+    /// Native OTP generation returned a nonzero status.
+    OtpFailed,
+    /// Native synchronization returned a nonzero status.
+    SynchronizeFailed,
+    /// Native provisioning erasure returned a nonzero status.
+    EraseProvisioningFailed,
+    /// Durable provisioning state is absent.
+    StateMissing,
+    /// Durable provisioning state is malformed or violates its bounds.
+    StateCorrupt,
+    /// Durable provisioning state could not be staged or published.
+    StateFailed,
     /// The helper exceeded its single invocation deadline.
     TimedOut,
     /// The helper terminated by signal, abort, or an abort-only shim.
@@ -93,6 +129,14 @@ impl BridgeError {
             Self::MissingExport => Stage::Bind,
             Self::CoreAdiLoadFailed => Stage::LoadCoreAdi,
             Self::ProvisioningPathFailed => Stage::SetProvisioningPath,
+            Self::SetAndroidIdFailed => Stage::SetAndroidId,
+            Self::StartProvisioningFailed => Stage::StartProvisioning,
+            Self::EndProvisioningFailed => Stage::EndProvisioning,
+            Self::DestroyProvisioningFailed => Stage::DestroyProvisioning,
+            Self::OtpFailed => Stage::Otp,
+            Self::SynchronizeFailed => Stage::Synchronize,
+            Self::EraseProvisioningFailed => Stage::EraseProvisioning,
+            Self::StateMissing | Self::StateCorrupt | Self::StateFailed => Stage::State,
             Self::TimedOut | Self::HelperCrashed | Self::HelperFailed | Self::ProcessIo => {
                 Stage::Process
             }
@@ -114,6 +158,16 @@ impl BridgeError {
             Self::HelperCrashed => 11,
             Self::HelperFailed => 12,
             Self::ProcessIo => 13,
+            Self::SetAndroidIdFailed => 14,
+            Self::StartProvisioningFailed => 15,
+            Self::EndProvisioningFailed => 16,
+            Self::DestroyProvisioningFailed => 17,
+            Self::OtpFailed => 18,
+            Self::SynchronizeFailed => 19,
+            Self::EraseProvisioningFailed => 20,
+            Self::StateMissing => 21,
+            Self::StateCorrupt => 22,
+            Self::StateFailed => 23,
         }
     }
 
@@ -132,6 +186,16 @@ impl BridgeError {
             11 => Self::HelperCrashed,
             12 => Self::HelperFailed,
             13 => Self::ProcessIo,
+            14 => Self::SetAndroidIdFailed,
+            15 => Self::StartProvisioningFailed,
+            16 => Self::EndProvisioningFailed,
+            17 => Self::DestroyProvisioningFailed,
+            18 => Self::OtpFailed,
+            19 => Self::SynchronizeFailed,
+            20 => Self::EraseProvisioningFailed,
+            21 => Self::StateMissing,
+            22 => Self::StateCorrupt,
+            23 => Self::StateFailed,
             _ => return None,
         })
     }

@@ -21,8 +21,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
-use std::io::{self, Read};
-use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -33,15 +34,20 @@ use elf_loader::{Loader, Relocator};
 use zeroize::Zeroizing;
 
 use crate::abi::{
-    AdiDispose, AdiGetLoginCode, AdiLoadLibraryWithPath, AdiSetProvisioningPath, ImageKind, Import,
-    MAX_LIBRARY_BYTES, validate,
+    AdiDispose, AdiGetLoginCode, AdiLoadLibraryWithPath, AdiOtpRequest, AdiProvisioningDestroy,
+    AdiProvisioningEnd, AdiProvisioningErase, AdiProvisioningStart, AdiSetAndroidId,
+    AdiSetProvisioningPath, AdiSynchronize, ImageKind, Import, MAX_LIBRARY_BYTES, validate,
 };
+use crate::client::STATE_CAPABILITY_FD;
 use crate::error::BridgeError;
-use crate::ipc::{self, Operation, Request, Response};
+use crate::ipc::{self, Operation, Request, Response, TransactionCommand};
 
 const DS_ID_SENTINEL: i64 = -2;
 const MAX_C_STRING_BYTES: usize = 4 * 1024;
 const MAX_ADI_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_STATE_ENTRIES: usize = 1024;
+const MAX_STATE_DEPTH: usize = 16;
+const MAX_STATE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const CORE_HANDLE: usize = 0x434f_5245;
 
 /// A non-secret classification of an Android property requested by Apple code.
@@ -102,32 +108,65 @@ static STATE_ROOT: Mutex<Option<StateRoot>> = Mutex::new(None);
 struct StateRoot {
     path: Vec<u8>,
     descriptor: OwnedFd,
+    entries: usize,
+    total_bytes: u64,
+    open_files: BTreeMap<c_int, (u64, u64)>,
 }
 
+#[allow(unsafe_code)]
 pub(crate) fn serve_one() -> Result<(), BridgeError> {
-    let response = match crate::sandbox::arm_parent_death() {
-        Ok(()) => match ipc::read_request(io::stdin().lock()) {
-            Ok(request) => handle(request).unwrap_or_else(Response::Error),
-            Err(error) => Response::Error(error),
-        },
-        Err(error) => Response::Error(error),
-    };
-    ipc::write_response(io::stdout().lock(), &response)
+    // SAFETY: this is the helper's sole owner of its standard-input
+    // descriptor.  A `File` performs unbuffered reads, so secret frames cannot
+    // remain in the process-global `Stdin` buffer.
+    let mut stdin = unsafe { std::fs::File::from_raw_fd(libc::STDIN_FILENO) };
+    // SAFETY: likewise, this is the helper's sole standard-output owner and
+    // writes directly to the pipe without retaining secret response bytes in
+    // Rust's process-global line buffer.
+    let mut stdout = unsafe { std::fs::File::from_raw_fd(libc::STDOUT_FILENO) };
+    // SAFETY: `umask` has no pointer arguments.  A private mask ensures every
+    // file or directory created by native ADI starts without group/other
+    // access even when the launching application inherited a permissive mask.
+    let _ = unsafe { libc::umask(0o077) };
+    let result = crate::sandbox::arm_parent_death()
+        .and_then(|()| crate::sandbox::harden_before_input())
+        .and_then(|()| ipc::read_request_frame(&mut stdin))
+        .and_then(|request| {
+            let capability = take_state_capability()?;
+            if request.operation == Operation::StartProvisioning {
+                handle_provisioning(request, capability, &mut stdin, &mut stdout)
+            } else {
+                ipc::require_eof(&mut stdin)?;
+                let response = handle(request, capability).unwrap_or_else(Response::Error);
+                ipc::write_response(&mut stdout, &response)
+            }
+        });
+    if let Err(error) = result {
+        ipc::write_response(&mut stdout, &Response::Error(error))?;
+    }
+    Ok(())
 }
 
-fn handle(request: Request) -> Result<Response, BridgeError> {
+fn handle(request: Request, capability: OwnedFd) -> Result<Response, BridgeError> {
     let architecture = supported_architecture()?;
     match request.operation {
         Operation::SandboxProbe => {
-            let state = checked_state_directory(&request.state_directory)?;
-            crate::sandbox::apply(&state)?;
+            checked_state_directory(
+                &request.provisioning_root,
+                &request.state_directory,
+                &capability,
+            )?;
+            crate::sandbox::apply(capability)?;
             Ok(Response::SandboxEnabled)
         }
-        Operation::OfflineSmoke => offline_smoke(
-            architecture,
-            &request.library_root,
-            &request.state_directory,
-        ),
+        Operation::OfflineSmoke
+        | Operation::SetAndroidId
+        | Operation::QueryProvisioned
+        | Operation::RequestOtp
+        | Operation::Synchronize
+        | Operation::EraseProvisioning => run_operation(architecture, request, capability),
+        Operation::StartProvisioning
+        | Operation::EndProvisioning
+        | Operation::DestroyProvisioning => Err(BridgeError::InvalidMessage),
     }
 }
 
@@ -139,11 +178,12 @@ fn supported_architecture() -> Result<Architecture, BridgeError> {
 }
 
 #[allow(unsafe_code)]
-fn offline_smoke(
+fn load_runtime(
     architecture: Architecture,
-    library_root: &Path,
-    state_directory: &Path,
-) -> Result<Response, BridgeError> {
+    request: &Request,
+    capability: OwnedFd,
+) -> Result<NativeRuntime, BridgeError> {
+    let library_root = &request.library_root;
     if !library_root.is_absolute() {
         return Err(BridgeError::InvalidPath);
     }
@@ -168,16 +208,27 @@ fn offline_smoke(
     let ssc = relocate(&ssc_bytes, &bridge)?;
     let entries = bind_adi_entries(&ssc)?;
 
-    // The parent owns and cleans this disposable directory. It never points at
-    // the XDG provisioning directory owned by a later slice.
-    let state = checked_state_directory(state_directory)?;
+    checked_state_directory(
+        &request.provisioning_root,
+        &request.state_directory,
+        &capability,
+    )?;
+    let capability_path = PathBuf::from(format!("/proc/self/fd/{}", capability.as_raw_fd()));
+    let mut state_entries = 0usize;
+    let mut state_bytes = 0u64;
+    count_state_entries(&capability_path, 0, &mut state_entries, &mut state_bytes)?;
     let library_directory = CString::new(library_directory.as_os_str().as_encoded_bytes())
         .map_err(|_| BridgeError::InvalidPath)?;
-    let state_path =
-        CString::new(state.as_os_str().as_encoded_bytes()).map_err(|_| BridgeError::InvalidPath)?;
+    let state_path = CString::new(request.state_directory.as_os_str().as_encoded_bytes())
+        .map_err(|_| BridgeError::InvalidPath)?;
 
-    let state_descriptor = crate::sandbox::apply(&state)?;
-    configure_state_root(&state, state_descriptor)?;
+    let state_descriptor = crate::sandbox::apply(capability)?;
+    configure_state_root(
+        &request.state_directory,
+        state_descriptor,
+        state_entries,
+        state_bytes,
+    )?;
     // SAFETY: all three pointers were resolved from the policy-verified SSC
     // image with the MPL-declared prototypes.  C strings remain live across
     // each call.  The helper's seccomp and rlimits contain a bad ABI or abort.
@@ -191,45 +242,329 @@ fn offline_smoke(
     if path_set != 0 {
         return Err(BridgeError::ProvisioningPathFailed);
     }
-    // SAFETY: the query takes only the documented sentinel integer and
-    // returns an integer status; it produces no borrowed output.
-    let provisioned = unsafe { (entries.get_login_code)(DS_ID_SENTINEL) } == 0;
-    let properties = PROPERTY_QUERIES
-        .lock()
-        .map_err(|_| BridgeError::HelperFailed)?
-        .clone();
-    drop((ssc, core));
-    Ok(Response::Smoke {
-        provisioned,
-        properties,
+    Ok(NativeRuntime {
+        _ssc: ssc,
+        _core: core,
+        entries,
     })
 }
 
-fn checked_state_directory(state_directory: &Path) -> Result<PathBuf, BridgeError> {
-    use std::os::unix::fs::PermissionsExt as _;
+#[allow(unsafe_code)]
+fn run_operation(
+    architecture: Architecture,
+    request: Request,
+    capability: OwnedFd,
+) -> Result<Response, BridgeError> {
+    let runtime = load_runtime(architecture, &request, capability)?;
+    if request.operation != Operation::OfflineSmoke {
+        set_android_id(&runtime.entries, &request.android_id)?;
+    }
+    let response = match request.operation {
+        Operation::OfflineSmoke => {
+            // SAFETY: the query takes only the declared scalar identifier.
+            let provisioned = unsafe { (runtime.entries.get_login_code)(DS_ID_SENTINEL) } == 0;
+            let properties = PROPERTY_QUERIES
+                .lock()
+                .map_err(|_| BridgeError::HelperFailed)?
+                .clone();
+            Response::Smoke {
+                provisioned,
+                properties,
+            }
+        }
+        Operation::SetAndroidId => Response::Unit(Operation::SetAndroidId),
+        Operation::QueryProvisioned => {
+            Response::Provisioned(is_provisioned(&runtime.entries, request.ds_id))
+        }
+        Operation::RequestOtp => request_otp(&runtime.entries, request.ds_id)?,
+        Operation::Synchronize => synchronize(&runtime.entries, request.ds_id, &request.secret)?,
+        Operation::EraseProvisioning => {
+            erase_provisioning(&runtime.entries, request.ds_id)?;
+            Response::Unit(Operation::EraseProvisioning)
+        }
+        _ => return Err(BridgeError::InvalidMessage),
+    };
+    let properties = PROPERTY_QUERIES
+        .lock()
+        .map_err(|_| BridgeError::HelperFailed)?;
+    drop(properties);
+    Ok(response)
+}
 
-    if !state_directory.is_absolute() {
+#[allow(unsafe_code)]
+fn is_provisioned(entries: &AdiEntries, ds_id: i64) -> bool {
+    // SAFETY: the exact MPL declaration takes one scalar identifier.
+    unsafe { (entries.get_login_code)(ds_id) == 0 }
+}
+
+#[allow(unsafe_code)]
+fn erase_provisioning(entries: &AdiEntries, ds_id: i64) -> Result<(), BridgeError> {
+    // SAFETY: the exact MPL declaration takes one scalar identifier.
+    if unsafe { (entries.provisioning_erase)(ds_id) } == 0 {
+        Ok(())
+    } else {
+        Err(BridgeError::EraseProvisioningFailed)
+    }
+}
+
+#[allow(unsafe_code)]
+fn request_otp(entries: &AdiEntries, ds_id: i64) -> Result<Response, BridgeError> {
+    let mut mid_pointer = std::ptr::null();
+    let mut mid_length = 0u32;
+    let mut otp_pointer = std::ptr::null();
+    let mut otp_length = 0u32;
+    // SAFETY: the verified entry uses the exact MPL declaration.  All output
+    // slots are live, and every returned allocation is immediately placed in
+    // an exactly-once ADI-owned buffer before status handling.
+    let status = unsafe {
+        (entries.otp_request)(
+            ds_id,
+            &mut mid_pointer,
+            &mut mid_length,
+            &mut otp_pointer,
+            &mut otp_length,
+        )
+    };
+    // SAFETY: the paired disposer came from the same verified image.  The
+    // wrappers bound copies and dispose on every success or early return.
+    let mid =
+        unsafe { AdiOwnedBuffer::from_raw(mid_pointer, mid_length as usize, entries.dispose) };
+    // SAFETY: identical ownership and bound invariant for OTP.
+    let otp =
+        unsafe { AdiOwnedBuffer::from_raw(otp_pointer, otp_length as usize, entries.dispose) };
+    if status != 0 {
+        return Err(BridgeError::OtpFailed);
+    }
+    Ok(Response::SecretPair {
+        operation: Operation::RequestOtp,
+        first: mid.copy_and_dispose()?,
+        second: otp.copy_and_dispose()?,
+    })
+}
+
+#[allow(unsafe_code)]
+fn synchronize(entries: &AdiEntries, ds_id: i64, sim: &[u8]) -> Result<Response, BridgeError> {
+    let sim_length = u32::try_from(sim.len()).map_err(|_| BridgeError::InvalidMessage)?;
+    let mut mid_pointer = std::ptr::null();
+    let mut mid_length = 0u32;
+    let mut srm_pointer = std::ptr::null();
+    let mut srm_length = 0u32;
+    // SAFETY: the verified entry uses the exact MPL declaration; input and
+    // output slots remain live for the call and every output is then owned.
+    let status = unsafe {
+        (entries.synchronize)(
+            ds_id,
+            sim.as_ptr(),
+            sim_length,
+            &mut mid_pointer,
+            &mut mid_length,
+            &mut srm_pointer,
+            &mut srm_length,
+        )
+    };
+    // SAFETY: both pointers are paired with the disposer from this image.
+    let mid =
+        unsafe { AdiOwnedBuffer::from_raw(mid_pointer, mid_length as usize, entries.dispose) };
+    // SAFETY: same ownership invariant for SRM.
+    let srm =
+        unsafe { AdiOwnedBuffer::from_raw(srm_pointer, srm_length as usize, entries.dispose) };
+    if status != 0 {
+        return Err(BridgeError::SynchronizeFailed);
+    }
+    Ok(Response::SecretPair {
+        operation: Operation::Synchronize,
+        first: mid.copy_and_dispose()?,
+        second: srm.copy_and_dispose()?,
+    })
+}
+
+fn handle_provisioning(
+    request: Request,
+    capability: OwnedFd,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+) -> Result<(), BridgeError> {
+    let architecture = supported_architecture()?;
+    let runtime = load_runtime(architecture, &request, capability)?;
+    set_android_id(&runtime.entries, &request.android_id)?;
+    let (cpim, session) = start_native_session(&runtime.entries, request.ds_id, &request.secret)?;
+    ipc::write_response(&mut *stdout, &Response::ProvisioningStarted(cpim))?;
+    stdout.flush().map_err(|_| BridgeError::ProcessIo)?;
+    let command = read_transaction_command(stdin);
+    let response = match command {
+        Ok(TransactionCommand::Finish { ptm, tk }) => match session.finish(&ptm, &tk) {
+            Ok(()) => Response::Unit(Operation::EndProvisioning),
+            Err(error) => Response::Error(error),
+        },
+        Ok(TransactionCommand::Cancel) => match session.destroy() {
+            Ok(()) => Response::Unit(Operation::DestroyProvisioning),
+            Err(error) => Response::Error(error),
+        },
+        Err(error) => {
+            drop(session);
+            Response::Error(error)
+        }
+    };
+    ipc::write_response(&mut *stdout, &response)
+}
+
+fn read_transaction_command(reader: &mut impl Read) -> Result<TransactionCommand, BridgeError> {
+    let command = ipc::read_transaction_command(reader)?;
+    ipc::require_eof(reader)?;
+    Ok(command)
+}
+
+#[allow(unsafe_code)]
+fn set_android_id(entries: &AdiEntries, android_id: &[u8]) -> Result<(), BridgeError> {
+    let length = u32::try_from(android_id.len()).map_err(|_| BridgeError::InvalidMessage)?;
+    if android_id.len() != 16 {
+        return Err(BridgeError::InvalidMessage);
+    }
+    // SAFETY: the exact MPL declaration takes the live fixed-width byte slice.
+    if unsafe { (entries.set_android_id)(android_id.as_ptr(), length) } == 0 {
+        Ok(())
+    } else {
+        Err(BridgeError::SetAndroidIdFailed)
+    }
+}
+
+#[allow(unsafe_code)]
+fn start_native_session(
+    entries: &AdiEntries,
+    ds_id: i64,
+    spim: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, NativeProvisioningSession), BridgeError> {
+    let spim_length = u32::try_from(spim.len()).map_err(|_| BridgeError::InvalidMessage)?;
+    let mut cpim_pointer = std::ptr::null();
+    let mut cpim_length = 0u32;
+    let mut handle = 0u32;
+    // SAFETY: the verified entry uses the exact MPL declaration.  Input and
+    // output slots are live, and CPIM is immediately assigned to its disposer.
+    let status = unsafe {
+        (entries.provisioning_start)(
+            ds_id,
+            spim.as_ptr(),
+            spim_length,
+            &mut cpim_pointer,
+            &mut cpim_length,
+            &mut handle,
+        )
+    };
+    // SAFETY: CPIM and the disposer originate from the same verified image.
+    let cpim =
+        unsafe { AdiOwnedBuffer::from_raw(cpim_pointer, cpim_length as usize, entries.dispose) };
+    if status != 0 {
+        return Err(BridgeError::StartProvisioningFailed);
+    }
+    let session = NativeProvisioningSession {
+        handle,
+        end: entries.provisioning_end,
+        destroy: entries.provisioning_destroy,
+        active: true,
+    };
+    let cpim = cpim.copy_and_dispose()?;
+    Ok((cpim, session))
+}
+
+struct NativeProvisioningSession {
+    handle: u32,
+    end: AdiProvisioningEnd,
+    destroy: AdiProvisioningDestroy,
+    active: bool,
+}
+
+impl NativeProvisioningSession {
+    #[allow(unsafe_code)]
+    fn finish(mut self, ptm: &[u8], tk: &[u8]) -> Result<(), BridgeError> {
+        let ptm_length = u32::try_from(ptm.len()).map_err(|_| BridgeError::InvalidMessage)?;
+        let tk_length = u32::try_from(tk.len()).map_err(|_| BridgeError::InvalidMessage)?;
+        // SAFETY: the move-only owner proves this handle has not been ended or
+        // destroyed.  Both bounded input slices remain live for the call.
+        let status = unsafe {
+            (self.end)(
+                self.handle,
+                ptm.as_ptr(),
+                ptm_length,
+                tk.as_ptr(),
+                tk_length,
+            )
+        };
+        if status == 0 {
+            self.active = false;
+            Ok(())
+        } else {
+            // Drop performs the one allowed destroy cleanup.  It never repeats
+            // the failed end operation.
+            Err(BridgeError::EndProvisioningFailed)
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn destroy(mut self) -> Result<(), BridgeError> {
+        self.active = false;
+        // SAFETY: ownership is consumed and the flag is cleared before the
+        // call, so even a failing destroy cannot be attempted a second time.
+        if unsafe { (self.destroy)(self.handle) } == 0 {
+            Ok(())
+        } else {
+            Err(BridgeError::DestroyProvisioningFailed)
+        }
+    }
+}
+
+impl Drop for NativeProvisioningSession {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            // SAFETY: this is the exactly-once cleanup for a session that was
+            // neither successfully ended nor explicitly destroyed.
+            let _ = unsafe { (self.destroy)(self.handle) };
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn checked_state_directory(
+    provisioning_root: &Path,
+    state_directory: &Path,
+    capability: &OwnedFd,
+) -> Result<(), BridgeError> {
+    if !provisioning_root.is_absolute() || !state_directory.is_absolute() {
         return Err(BridgeError::InvalidPath);
     }
-    let state = std::fs::canonicalize(state_directory).map_err(|_| BridgeError::InvalidPath)?;
-    let metadata = std::fs::metadata(&state).map_err(|_| BridgeError::InvalidPath)?;
-    let prefixed = state
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("coffer-anisette-state-"));
-    let empty = std::fs::read_dir(&state)
-        .map_err(|_| BridgeError::InvalidPath)?
-        .next()
-        .is_none();
-    if state != state_directory
-        || !metadata.is_dir()
-        || metadata.permissions().mode() & 0o777 != 0o700
-        || !prefixed
-        || !empty
+    crate::state::validate_staging_path(provisioning_root, state_directory)?;
+    let path_metadata = std::fs::metadata(state_directory).map_err(|_| BridgeError::InvalidPath)?;
+    let descriptor_metadata = std::fs::File::from(
+        capability
+            .try_clone()
+            .map_err(|_| BridgeError::InvalidPath)?,
+    )
+    .metadata()
+    .map_err(|_| BridgeError::InvalidPath)?;
+    // SAFETY: `geteuid` has no pointer arguments or preconditions.
+    let uid = unsafe { libc::geteuid() };
+    if path_metadata.dev() != descriptor_metadata.dev()
+        || path_metadata.ino() != descriptor_metadata.ino()
+        || path_metadata.uid() != uid
+        || descriptor_metadata.uid() != uid
+        || path_metadata.mode() & 0o777 != 0o700
+        || !descriptor_metadata.is_dir()
     {
         return Err(BridgeError::InvalidPath);
     }
-    Ok(state)
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn take_state_capability() -> Result<OwnedFd, BridgeError> {
+    // SAFETY: F_GETFD only validates the injected fixed descriptor.
+    if unsafe { libc::fcntl(STATE_CAPABILITY_FD, libc::F_GETFD) } < 0 {
+        return Err(BridgeError::InvalidPath);
+    }
+    // SAFETY: the successful F_GETFD proves the descriptor is open.  This is
+    // the helper's sole owner after exec, transferred into RAII exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(STATE_CAPABILITY_FD) })
 }
 
 fn checked_library_path(directory: &Path, basename: &str) -> Result<PathBuf, BridgeError> {
@@ -302,10 +637,25 @@ fn publish_core_symbols(core: &LoadedCore<()>) -> Result<(), BridgeError> {
     Ok(())
 }
 
+struct NativeRuntime {
+    _ssc: LoadedCore<()>,
+    _core: LoadedCore<()>,
+    entries: AdiEntries,
+}
+
+#[derive(Clone, Copy)]
 struct AdiEntries {
     load_core_adi: AdiLoadLibraryWithPath,
+    set_android_id: AdiSetAndroidId,
     set_provisioning_path: AdiSetProvisioningPath,
+    provisioning_erase: AdiProvisioningErase,
+    synchronize: AdiSynchronize,
+    provisioning_destroy: AdiProvisioningDestroy,
+    provisioning_end: AdiProvisioningEnd,
+    provisioning_start: AdiProvisioningStart,
     get_login_code: AdiGetLoginCode,
+    dispose: AdiDispose,
+    otp_request: AdiOtpRequest,
 }
 
 #[allow(unsafe_code)]
@@ -314,16 +664,48 @@ fn bind_adi_entries(ssc: &LoadedCore<()>) -> Result<AdiEntries, BridgeError> {
     // the MPL-2.0 SideStore declarations recorded in `abi`.
     let load_core_adi = *unsafe { ssc.get::<AdiLoadLibraryWithPath>("kq56gsgHG6") }
         .ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let set_android_id =
+        *unsafe { ssc.get::<AdiSetAndroidId>("Sph98paBcz") }.ok_or(BridgeError::MissingExport)?;
     // SAFETY: same policy and provenance as above.
     let set_provisioning_path = *unsafe { ssc.get::<AdiSetProvisioningPath>("nf92ngaK92") }
+        .ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let provisioning_erase = *unsafe { ssc.get::<AdiProvisioningErase>("p435tmhbla") }
+        .ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let synchronize =
+        *unsafe { ssc.get::<AdiSynchronize>("tn46gtiuhw") }.ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let provisioning_destroy = *unsafe { ssc.get::<AdiProvisioningDestroy>("fy34trz2st") }
+        .ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let provisioning_end = *unsafe { ssc.get::<AdiProvisioningEnd>("uv5t6nhkui") }
+        .ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let provisioning_start = *unsafe { ssc.get::<AdiProvisioningStart>("rsegvyrt87") }
         .ok_or(BridgeError::MissingExport)?;
     // SAFETY: same policy and provenance as above.
     let get_login_code =
         *unsafe { ssc.get::<AdiGetLoginCode>("aslgmuibau") }.ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let dispose =
+        *unsafe { ssc.get::<AdiDispose>("jk24uiwqrg") }.ok_or(BridgeError::MissingExport)?;
+    // SAFETY: same exact policy and MPL declaration as above.
+    let otp_request =
+        *unsafe { ssc.get::<AdiOtpRequest>("qi864985u0") }.ok_or(BridgeError::MissingExport)?;
     Ok(AdiEntries {
         load_core_adi,
+        set_android_id,
         set_provisioning_path,
+        provisioning_erase,
+        synchronize,
+        provisioning_destroy,
+        provisioning_end,
+        provisioning_start,
         get_login_code,
+        dispose,
+        otp_request,
     })
 }
 
@@ -377,11 +759,11 @@ fn real_shims() -> BTreeMap<&'static str, *const ()> {
         ("open", shim_open as *const ()),
         ("read", libc::read as *const ()),
         ("write", shim_write as *const ()),
-        ("close", libc::close as *const ()),
+        ("close", shim_close as *const ()),
         ("mkdir", shim_mkdir as *const ()),
         ("chmod", shim_chmod as *const ()),
-        ("umask", libc::umask as *const ()),
-        ("ftruncate", libc::ftruncate as *const ()),
+        ("umask", shim_umask as *const ()),
+        ("ftruncate", shim_ftruncate as *const ()),
         ("fstat", libc::fstat as *const ()),
         ("lstat", shim_lstat as *const ()),
         ("gettimeofday", libc::gettimeofday as *const ()),
@@ -507,7 +889,49 @@ fn bounded_c_string(pointer: *const c_char) -> Option<Vec<u8>> {
     None
 }
 
-fn configure_state_root(path: &Path, descriptor: OwnedFd) -> Result<(), BridgeError> {
+fn count_state_entries(
+    directory: &Path,
+    depth: usize,
+    count: &mut usize,
+    total_bytes: &mut u64,
+) -> Result<(), BridgeError> {
+    if depth > MAX_STATE_DEPTH {
+        return Err(BridgeError::StateCorrupt);
+    }
+    for entry in std::fs::read_dir(directory).map_err(|_| BridgeError::StateCorrupt)? {
+        let entry = entry.map_err(|_| BridgeError::StateCorrupt)?;
+        *count = count.checked_add(1).ok_or(BridgeError::StateCorrupt)?;
+        if *count > MAX_STATE_ENTRIES {
+            return Err(BridgeError::StateCorrupt);
+        }
+        let file_type = entry.file_type().map_err(|_| BridgeError::StateCorrupt)?;
+        if file_type.is_symlink() || !(file_type.is_file() || file_type.is_dir()) {
+            return Err(BridgeError::InvalidPath);
+        }
+        if file_type.is_dir() {
+            count_state_entries(&entry.path(), depth + 1, count, total_bytes)?;
+        } else {
+            let length = entry
+                .metadata()
+                .map_err(|_| BridgeError::StateCorrupt)?
+                .len();
+            *total_bytes = total_bytes
+                .checked_add(length)
+                .ok_or(BridgeError::StateCorrupt)?;
+            if *total_bytes > MAX_STATE_TOTAL_BYTES {
+                return Err(BridgeError::StateCorrupt);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn configure_state_root(
+    path: &Path,
+    descriptor: OwnedFd,
+    entries: usize,
+    total_bytes: u64,
+) -> Result<(), BridgeError> {
     let path = path.as_os_str().as_encoded_bytes();
     if path.contains(&0) {
         return Err(BridgeError::InvalidPath);
@@ -516,6 +940,9 @@ fn configure_state_root(path: &Path, descriptor: OwnedFd) -> Result<(), BridgeEr
     *state = Some(StateRoot {
         path: path.to_vec(),
         descriptor,
+        entries,
+        total_bytes,
+        open_files: BTreeMap::new(),
     });
     Ok(())
 }
@@ -535,11 +962,16 @@ fn relative_state_path(root: &[u8], requested: &[u8]) -> Option<CString> {
         requested
     };
     let mut normalized = Vec::new();
+    let mut depth = 0usize;
     for component in relative.split(|byte| *byte == b'/') {
         if component.is_empty() || component == b"." {
             continue;
         }
         if component == b".." {
+            return None;
+        }
+        depth = depth.checked_add(1)?;
+        if depth > MAX_STATE_DEPTH {
             return None;
         }
         if !normalized.is_empty() {
@@ -551,6 +983,45 @@ fn relative_state_path(root: &[u8], requested: &[u8]) -> Option<CString> {
         normalized.push(b'.');
     }
     CString::new(normalized).ok()
+}
+
+#[allow(unsafe_code)]
+fn entry_metadata(directory: c_int, relative: &CString) -> Option<Option<libc::stat>> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the descriptor and relative C string are live.  The output is
+    // inspected only after a successful call.
+    if unsafe {
+        libc::fstatat(
+            directory,
+            relative.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        // SAFETY: the successful call initialized the output structure.
+        return Some(Some(unsafe { metadata.assume_init() }));
+    }
+    // SAFETY: errno is read immediately after the failed `fstatat`.
+    (unsafe { *libc::__errno_location() } == libc::ENOENT).then_some(None)
+}
+
+#[allow(unsafe_code)]
+fn descriptor_metadata(descriptor: c_int) -> Option<libc::stat> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the output slot is live and inspected only on success.
+    if unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: the successful call initialized the output structure.
+    Some(unsafe { metadata.assume_init() })
+}
+
+fn regular_size(metadata: &libc::stat) -> Option<u64> {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG || metadata.st_size < 0 {
+        return None;
+    }
+    u64::try_from(metadata.st_size).ok()
 }
 
 fn state_path(requested: *const c_char) -> Option<(c_int, CString)> {
@@ -569,33 +1040,120 @@ fn reject_path() -> c_int {
 }
 
 #[allow(unsafe_code)]
-unsafe extern "C" fn shim_open(path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
-    let Some((directory, relative)) = state_path(path) else {
+unsafe extern "C" fn shim_open(path: *const c_char, flags: c_int, _mode: libc::mode_t) -> c_int {
+    let Some(requested) = bounded_c_string(path) else {
         return reject_path();
     };
+    let Ok(mut state) = STATE_ROOT.lock() else {
+        return reject_path();
+    };
+    let Some(state) = state.as_mut() else {
+        return reject_path();
+    };
+    let Some(relative) = relative_state_path(&state.path, &requested) else {
+        return reject_path();
+    };
+    let directory = state.descriptor.as_raw_fd();
+    let Some(previous) = entry_metadata(directory, &relative) else {
+        return reject_path();
+    };
+    let creates_entry = previous.is_none() && flags & libc::O_CREAT != 0;
+    if creates_entry && state.entries >= MAX_STATE_ENTRIES {
+        return reject_path();
+    }
     // SAFETY: `relative` is a live, NUL-terminated path constrained beneath
     // the pre-opened empty state root.  The third argument is consulted only
     // for creation flags, matching POSIX open's variadic ABI.
-    unsafe { libc::openat(directory, relative.as_ptr(), flags, mode) }
+    let descriptor = unsafe { libc::openat(directory, relative.as_ptr(), flags, 0o600) };
+    if descriptor >= 0 {
+        let Some(current) = descriptor_metadata(descriptor) else {
+            // SAFETY: the successful open returned this owned descriptor.
+            let _ = unsafe { libc::close(descriptor) };
+            return reject_path();
+        };
+        if let Some(current_size) = regular_size(&current) {
+            let previous_size = previous.as_ref().and_then(regular_size).unwrap_or(0);
+            let Some(updated_total) = state
+                .total_bytes
+                .checked_sub(previous_size)
+                .and_then(|total| total.checked_add(current_size))
+            else {
+                // SAFETY: same fresh descriptor; refusal must not leak it.
+                let _ = unsafe { libc::close(descriptor) };
+                return reject_path();
+            };
+            if updated_total > MAX_STATE_TOTAL_BYTES {
+                // SAFETY: same fresh descriptor; refusal must not leak it.
+                let _ = unsafe { libc::close(descriptor) };
+                return reject_path();
+            }
+            state.total_bytes = updated_total;
+            state
+                .open_files
+                .insert(descriptor, (current.st_dev, current.st_ino));
+        }
+        if creates_entry {
+            state.entries += 1;
+        }
+    }
+    descriptor
 }
 
 #[allow(unsafe_code)]
-unsafe extern "C" fn shim_mkdir(path: *const c_char, mode: libc::mode_t) -> c_int {
-    let Some((directory, relative)) = state_path(path) else {
+unsafe extern "C" fn shim_mkdir(path: *const c_char, _mode: libc::mode_t) -> c_int {
+    let Some(requested) = bounded_c_string(path) else {
         return reject_path();
     };
+    let Ok(mut state) = STATE_ROOT.lock() else {
+        return reject_path();
+    };
+    let Some(state) = state.as_mut() else {
+        return reject_path();
+    };
+    let Some(relative) = relative_state_path(&state.path, &requested) else {
+        return reject_path();
+    };
+    if state.entries >= MAX_STATE_ENTRIES {
+        return reject_path();
+    }
     // SAFETY: the descriptor and normalized relative path are confined to the
     // disposable state root.
-    unsafe { libc::mkdirat(directory, relative.as_ptr(), mode) }
+    let result = unsafe { libc::mkdirat(state.descriptor.as_raw_fd(), relative.as_ptr(), 0o700) };
+    if result == 0 {
+        state.entries += 1;
+    }
+    result
 }
 
 #[allow(unsafe_code)]
-unsafe extern "C" fn shim_chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
+unsafe extern "C" fn shim_chmod(path: *const c_char, _mode: libc::mode_t) -> c_int {
     let Some((directory, relative)) = state_path(path) else {
         return reject_path();
     };
-    // SAFETY: the descriptor and normalized relative path are confined to the
-    // disposable state root, which starts empty and cannot create symlinks.
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the output slot is live and the descriptor-relative path cannot
+    // escape the state root.  Symlinks cannot be created under seccomp.
+    if unsafe {
+        libc::fstatat(
+            directory,
+            relative.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return -1;
+    }
+    // SAFETY: the successful `fstatat` initialized the complete structure.
+    let metadata = unsafe { metadata.assume_init() };
+    let mode = match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => 0o700,
+        libc::S_IFREG => 0o600,
+        _ => return reject_path(),
+    };
+    // SAFETY: the same confined path is normalized to the canonical private
+    // mode for its type, so native chmod cannot make durable state public or
+    // leave it unreadable by the next generation copy.
     unsafe { libc::fchmodat(directory, relative.as_ptr(), mode, 0) }
 }
 
@@ -634,14 +1192,148 @@ extern "C" fn shim_fflush(_stream: *mut c_void) -> c_int {
     0
 }
 
+extern "C" fn shim_umask(_mask: libc::mode_t) -> libc::mode_t {
+    // `serve_one` installs this private process mask before reading input.
+    // Native code may observe it but cannot weaken or strengthen it in ways
+    // that would make later state fail exact-mode validation.
+    0o077
+}
+
+fn tracked_regular_file(state: &mut StateRoot, descriptor: c_int) -> Option<libc::stat> {
+    let expected = state.open_files.get(&descriptor).copied()?;
+    let metadata = descriptor_metadata(descriptor)?;
+    let observed = (metadata.st_dev, metadata.st_ino);
+    if observed != expected || regular_size(&metadata).is_none() {
+        state.open_files.remove(&descriptor);
+        return None;
+    }
+    Some(metadata)
+}
+
+#[allow(unsafe_code)]
+fn reject_file_growth() -> isize {
+    // SAFETY: glibc's thread-local errno pointer is valid for this thread.
+    unsafe { *libc::__errno_location() = libc::EFBIG };
+    -1
+}
+
 #[allow(unsafe_code)]
 extern "C" fn shim_write(descriptor: c_int, buffer: *const c_void, count: usize) -> isize {
     if matches!(descriptor, libc::STDOUT_FILENO | libc::STDERR_FILENO) {
         return isize::try_from(count).unwrap_or(isize::MAX);
     }
+    let Ok(mut state) = STATE_ROOT.lock() else {
+        return reject_file_growth();
+    };
+    let Some(state) = state.as_mut() else {
+        return reject_file_growth();
+    };
+    let Some(metadata) = tracked_regular_file(state, descriptor) else {
+        // SAFETY: untracked descriptors retain ordinary POSIX behavior.
+        return unsafe { libc::write(descriptor, buffer, count) };
+    };
+    let Some(current_size) = regular_size(&metadata) else {
+        return reject_file_growth();
+    };
+    // SAFETY: fcntl receives the live tracked descriptor.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    // SAFETY: lseek receives the same live tracked descriptor.
+    let offset = unsafe { libc::lseek(descriptor, 0, libc::SEEK_CUR) };
+    if flags < 0 || offset < 0 {
+        return reject_file_growth();
+    }
+    let byte_count = count;
+    let count = match u64::try_from(byte_count) {
+        Ok(count) => count,
+        Err(_) => return reject_file_growth(),
+    };
+    let write_start = if flags & libc::O_APPEND != 0 {
+        current_size
+    } else {
+        match u64::try_from(offset) {
+            Ok(offset) => offset,
+            Err(_) => return reject_file_growth(),
+        }
+    };
+    let prospective = match write_start.checked_add(count) {
+        Some(end) => current_size.max(end),
+        None => return reject_file_growth(),
+    };
+    let growth = prospective - current_size;
+    if state
+        .total_bytes
+        .checked_add(growth)
+        .is_none_or(|total| total > MAX_STATE_TOTAL_BYTES)
+    {
+        return reject_file_growth();
+    }
     // SAFETY: the proprietary caller owns a readable buffer of `count` bytes;
-    // non-diagnostic file descriptors retain ordinary POSIX write behavior.
-    unsafe { libc::write(descriptor, buffer, count) }
+    // the projected file extent was bounded before dispatch.
+    let result = unsafe { libc::write(descriptor, buffer, byte_count) };
+    if result >= 0
+        && let Some(after) = descriptor_metadata(descriptor).and_then(|value| regular_size(&value))
+        && let Some(total) = state
+            .total_bytes
+            .checked_sub(current_size)
+            .and_then(|total| total.checked_add(after))
+    {
+        state.total_bytes = total;
+    }
+    result
+}
+
+#[allow(unsafe_code)]
+extern "C" fn shim_ftruncate(descriptor: c_int, length: libc::off_t) -> c_int {
+    if length < 0 {
+        // SAFETY: glibc's thread-local errno pointer is valid for this thread.
+        unsafe { *libc::__errno_location() = libc::EINVAL };
+        return -1;
+    }
+    let Ok(mut state) = STATE_ROOT.lock() else {
+        return -1;
+    };
+    let Some(state) = state.as_mut() else {
+        return -1;
+    };
+    let Some(metadata) = tracked_regular_file(state, descriptor) else {
+        // SAFETY: untracked descriptors retain ordinary POSIX behavior.
+        return unsafe { libc::ftruncate(descriptor, length) };
+    };
+    let Some(current_size) = regular_size(&metadata) else {
+        return -1;
+    };
+    let Ok(new_size) = u64::try_from(length) else {
+        return -1;
+    };
+    let Some(updated_total) = state
+        .total_bytes
+        .checked_sub(current_size)
+        .and_then(|total| total.checked_add(new_size))
+    else {
+        let _ = reject_file_growth();
+        return -1;
+    };
+    if updated_total > MAX_STATE_TOTAL_BYTES {
+        let _ = reject_file_growth();
+        return -1;
+    }
+    // SAFETY: the live tracked descriptor and nonnegative length are valid.
+    let result = unsafe { libc::ftruncate(descriptor, length) };
+    if result == 0 {
+        state.total_bytes = updated_total;
+    }
+    result
+}
+
+#[allow(unsafe_code)]
+extern "C" fn shim_close(descriptor: c_int) -> c_int {
+    if let Ok(mut state) = STATE_ROOT.lock()
+        && let Some(state) = state.as_mut()
+    {
+        state.open_files.remove(&descriptor);
+    }
+    // SAFETY: ownership follows POSIX close and belongs to the native caller.
+    unsafe { libc::close(descriptor) }
 }
 
 #[allow(unsafe_code)]
@@ -1411,15 +2103,15 @@ impl Drop for AdiOwnedBuffer {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     #[cfg(target_arch = "x86_64")]
     use elf_loader::arch::x86_64::X86_64Arch;
     #[cfg(target_arch = "x86_64")]
     use elf_loader::elf::write::DsoBuilder;
 
     use super::*;
+    use std::fs;
 
     #[test]
     fn property_names_are_classified_without_retaining_unknown_text() {
@@ -1430,46 +2122,6 @@ mod tests {
         assert_eq!(
             classify_property(b"arbitrary-sensitive-looking"),
             PropertyKey::Unknown
-        );
-    }
-
-    #[test]
-    fn parent_owned_disposable_state_directory_is_accepted() {
-        let state = tempfile::Builder::new()
-            .prefix("coffer-anisette-state-")
-            .tempdir()
-            .expect("state directory");
-        std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("restrict state directory");
-        assert_eq!(
-            checked_state_directory(state.path()).expect("valid state directory"),
-            state.path()
-        );
-    }
-
-    #[test]
-    fn state_directory_must_be_private_and_empty() {
-        let nonempty = tempfile::Builder::new()
-            .prefix("coffer-anisette-state-")
-            .tempdir()
-            .expect("state directory");
-        std::fs::set_permissions(nonempty.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("restrict state directory");
-        std::fs::write(nonempty.path().join("unexpected"), b"x").expect("create entry");
-        assert_eq!(
-            checked_state_directory(nonempty.path()),
-            Err(BridgeError::InvalidPath)
-        );
-
-        let public = tempfile::Builder::new()
-            .prefix("coffer-anisette-state-")
-            .tempdir()
-            .expect("state directory");
-        std::fs::set_permissions(public.path(), std::fs::Permissions::from_mode(0o755))
-            .expect("set public mode");
-        assert_eq!(
-            checked_state_directory(public.path()),
-            Err(BridgeError::InvalidPath)
         );
     }
 
@@ -1494,7 +2146,120 @@ mod tests {
     }
 
     #[test]
+    fn native_path_shims_normalize_state_to_private_canonical_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_adapter_state();
+        let root = tempfile::tempdir().expect("state root");
+        let descriptor = std::fs::File::open(root.path()).expect("open root");
+        configure_state_root(root.path(), descriptor.into(), 0, 0).expect("configure root");
+        let file_path = CString::new(root.path().join("state").as_os_str().as_encoded_bytes())
+            .expect("file path");
+        // SAFETY: the configured state root and live C string meet the shim's
+        // FFI contract for this test invocation.
+        let file = unsafe {
+            shim_open(
+                file_path.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o666,
+            )
+        };
+        assert!(file >= 0);
+        // SAFETY: the successful shim returned a uniquely owned descriptor.
+        assert_eq!(unsafe { libc::close(file) }, 0);
+        assert_eq!(
+            std::fs::metadata(root.path().join("state"))
+                .expect("file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let directory_path =
+            CString::new(root.path().join("nested").as_os_str().as_encoded_bytes())
+                .expect("directory path");
+        // SAFETY: same confined state-root contract as the file call.
+        assert_eq!(unsafe { shim_mkdir(directory_path.as_ptr(), 0o777) }, 0);
+        // SAFETY: the path names the directory just created through the shim.
+        assert_eq!(unsafe { shim_chmod(directory_path.as_ptr(), 0o400) }, 0);
+        assert_eq!(
+            std::fs::metadata(root.path().join("nested"))
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(shim_umask(0o000), 0o077);
+        assert_eq!(shim_umask(0o777), 0o077);
+        reset_adapter_state();
+    }
+
+    #[test]
+    fn native_path_shims_enforce_entry_and_depth_bounds_at_creation() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_adapter_state();
+        let root = tempfile::tempdir().expect("state root");
+        let descriptor = std::fs::File::open(root.path()).expect("open root");
+        configure_state_root(root.path(), descriptor.into(), MAX_STATE_ENTRIES, 0)
+            .expect("configure root");
+        let file_path = CString::new(root.path().join("overflow").as_os_str().as_encoded_bytes())
+            .expect("file path");
+        // SAFETY: the live C string is valid; the shim must refuse it before
+        // creating another entry.
+        let result = unsafe { shim_open(file_path.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600) };
+        assert_eq!(result, -1);
+        assert!(!root.path().join("overflow").exists());
+
+        let deep = format!("{}/leaf", "nested/".repeat(MAX_STATE_DEPTH));
+        assert!(
+            relative_state_path(root.path().as_os_str().as_encoded_bytes(), deep.as_bytes())
+                .is_none()
+        );
+
+        reset_adapter_state();
+        let descriptor = std::fs::File::open(root.path()).expect("open root");
+        configure_state_root(root.path(), descriptor.into(), 0, MAX_STATE_TOTAL_BYTES - 2)
+            .expect("configure byte limit");
+        let bounded_path = CString::new(root.path().join("bounded").as_os_str().as_encoded_bytes())
+            .expect("bounded path");
+        // SAFETY: the live path names a new file inside the configured root.
+        let file = unsafe { shim_open(bounded_path.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600) };
+        assert!(file >= 0);
+        assert_eq!(shim_write(file, b"abc".as_ptr().cast(), 3), -1);
+        assert_eq!(
+            fs::metadata(root.path().join("bounded"))
+                .expect("metadata")
+                .len(),
+            0
+        );
+        assert_eq!(shim_ftruncate(file, 3), -1);
+        assert_eq!(shim_close(file), 0);
+        reset_adapter_state();
+    }
+
+    #[test]
+    fn helper_rejects_aggregate_existing_state_over_sixty_four_mib() {
+        let root = tempfile::tempdir().expect("state root");
+        for index in 0..5 {
+            let file =
+                fs::File::create(root.path().join(format!("state-{index}"))).expect("sparse state");
+            file.set_len(MAX_STATE_TOTAL_BYTES / 4)
+                .expect("sparse length");
+        }
+        let mut entries = 0usize;
+        let mut bytes = 0u64;
+        assert_eq!(
+            count_state_entries(root.path(), 0, &mut entries, &mut bytes),
+            Err(BridgeError::StateCorrupt)
+        );
+    }
+
+    #[test]
     fn dlopen_dlsym_and_dlclose_are_allowlisted_and_refcounted() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
         reset_adapter_state();
         CORE_CVU.store(0x1110, Ordering::SeqCst);
         CORE_VDF.store(0x2220, Ordering::SeqCst);
@@ -1538,6 +2303,7 @@ mod tests {
     }
 
     static DISPOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DISPOSE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[allow(unsafe_code)]
     unsafe extern "C" fn fake_dispose(pointer: *const u8) -> i32 {
@@ -1559,6 +2325,7 @@ mod tests {
     #[test]
     #[allow(unsafe_code)]
     fn adi_buffer_is_copied_zeroized_and_disposed_exactly_once() {
+        let _guard = DISPOSE_TEST_LOCK.lock().expect("test lock");
         DISPOSE_CALLS.store(0, Ordering::SeqCst);
         let pointer = Box::into_raw(Box::new(7u8));
         // SAFETY: the one-byte Box remains live and ownership is transferred
@@ -1573,6 +2340,7 @@ mod tests {
     #[test]
     #[allow(unsafe_code)]
     fn adi_buffer_copy_is_zeroizing_before_a_failing_disposer_returns() {
+        let _guard = DISPOSE_TEST_LOCK.lock().expect("test lock");
         DISPOSE_CALLS.store(0, Ordering::SeqCst);
         let pointer = Box::into_raw(Box::new(9u8));
         // SAFETY: the one-byte Box remains live and ownership is transferred
@@ -1582,6 +2350,284 @@ mod tests {
             .expect_err("disposal failure");
         assert_eq!(error, BridgeError::HelperFailed);
         assert_eq!(DISPOSE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    static START_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FAKE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static END_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static OTP_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ERASE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SET_ID_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LOGIN_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static NOOP_DISPOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static END_STATUS: AtomicU32 = AtomicU32::new(0);
+    static DESTROY_STATUS: AtomicU32 = AtomicU32::new(0);
+    static START_STATUS: AtomicU32 = AtomicU32::new(0);
+    static FAKE_CPIM: [u8; 4] = *b"cpim";
+    static FAKE_MID: [u8; 3] = *b"mid";
+    static FAKE_OTP: [u8; 3] = *b"otp";
+    static FAKE_SRM: [u8; 3] = *b"srm";
+
+    unsafe extern "C" fn fake_load(_path: *const u8) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_set_id(_id: *const u8, length: u32) -> i32 {
+        SET_ID_CALLS.fetch_add(1, Ordering::SeqCst);
+        i32::from(length != 16)
+    }
+
+    unsafe extern "C" fn fake_set_path(_path: *const u8) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_erase(_ds_id: i64) -> i32 {
+        ERASE_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn fake_sync(
+        _ds_id: i64,
+        _sim: *const u8,
+        _sim_length: u32,
+        mid: *mut *const u8,
+        mid_length: *mut u32,
+        srm: *mut *const u8,
+        srm_length: *mut u32,
+    ) -> i32 {
+        SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the operation tests pass live output slots of these exact
+        // types, as required by the MPL declaration.
+        unsafe {
+            mid.write(FAKE_MID.as_ptr());
+            mid_length.write(FAKE_MID.len() as u32);
+            srm.write(FAKE_SRM.as_ptr());
+            srm_length.write(FAKE_SRM.len() as u32);
+        }
+        0
+    }
+
+    unsafe extern "C" fn fake_destroy(_session: u32) -> i32 {
+        DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        DESTROY_STATUS.load(Ordering::SeqCst) as i32
+    }
+
+    unsafe extern "C" fn fake_end(
+        _session: u32,
+        _ptm: *const u8,
+        _ptm_length: u32,
+        _tk: *const u8,
+        _tk_length: u32,
+    ) -> i32 {
+        END_CALLS.fetch_add(1, Ordering::SeqCst);
+        END_STATUS.load(Ordering::SeqCst) as i32
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn fake_start(
+        _ds_id: i64,
+        _spim: *const u8,
+        _spim_length: u32,
+        cpim: *mut *const u8,
+        cpim_length: *mut u32,
+        session: *mut u32,
+    ) -> i32 {
+        START_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the tests pass live output slots matching the declaration.
+        unsafe {
+            cpim.write(FAKE_CPIM.as_ptr());
+            cpim_length.write(FAKE_CPIM.len() as u32);
+            session.write(7);
+        }
+        START_STATUS.load(Ordering::SeqCst) as i32
+    }
+
+    unsafe extern "C" fn fake_login(_ds_id: i64) -> i32 {
+        LOGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    unsafe extern "C" fn fake_noop_dispose(_pointer: *const u8) -> i32 {
+        NOOP_DISPOSE_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    unsafe extern "C" fn fake_failing_noop_dispose(_pointer: *const u8) -> i32 {
+        NOOP_DISPOSE_CALLS.fetch_add(1, Ordering::SeqCst);
+        -1
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn fake_otp(
+        _ds_id: i64,
+        mid: *mut *const u8,
+        mid_length: *mut u32,
+        otp: *mut *const u8,
+        otp_length: *mut u32,
+    ) -> i32 {
+        OTP_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the operation tests pass live output slots matching the
+        // exact MPL declaration.
+        unsafe {
+            mid.write(FAKE_MID.as_ptr());
+            mid_length.write(FAKE_MID.len() as u32);
+            otp.write(FAKE_OTP.as_ptr());
+            otp_length.write(FAKE_OTP.len() as u32);
+        }
+        0
+    }
+
+    fn fake_entries() -> AdiEntries {
+        AdiEntries {
+            load_core_adi: fake_load,
+            set_android_id: fake_set_id,
+            set_provisioning_path: fake_set_path,
+            provisioning_erase: fake_erase,
+            synchronize: fake_sync,
+            provisioning_destroy: fake_destroy,
+            provisioning_end: fake_end,
+            provisioning_start: fake_start,
+            get_login_code: fake_login,
+            dispose: fake_noop_dispose,
+            otp_request: fake_otp,
+        }
+    }
+
+    fn reset_fake_calls() {
+        for counter in [
+            &START_CALLS,
+            &END_CALLS,
+            &DESTROY_CALLS,
+            &OTP_CALLS,
+            &SYNC_CALLS,
+            &ERASE_CALLS,
+            &SET_ID_CALLS,
+            &LOGIN_CALLS,
+            &NOOP_DISPOSE_CALLS,
+        ] {
+            counter.store(0, Ordering::SeqCst);
+        }
+        END_STATUS.store(0, Ordering::SeqCst);
+        DESTROY_STATUS.store(0, Ordering::SeqCst);
+        START_STATUS.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn fake_abi_outputs_are_bounded_owned_and_disposed_once_each() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_fake_calls();
+        let entries = fake_entries();
+        let Response::SecretPair { first, second, .. } = request_otp(&entries, -2).expect("otp")
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(&*first, b"mid");
+        assert_eq!(&*second, b"otp");
+        assert_eq!(OTP_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(NOOP_DISPOSE_CALLS.load(Ordering::SeqCst), 2);
+
+        let Response::SecretPair { first, second, .. } =
+            synchronize(&entries, -2, b"sim").expect("synchronize")
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(&*first, b"mid");
+        assert_eq!(&*second, b"srm");
+        assert_eq!(SYNC_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(NOOP_DISPOSE_CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn scalar_abi_operations_dispatch_exactly_once() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_fake_calls();
+        let entries = fake_entries();
+        set_android_id(&entries, b"01234567-89AB-CD").expect("set identifier");
+        assert!(is_provisioned(&entries, -2));
+        erase_provisioning(&entries, -2).expect("erase");
+        assert_eq!(SET_ID_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(LOGIN_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(ERASE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provisioning_session_finish_cancel_and_failures_never_retry() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_fake_calls();
+        let entries = fake_entries();
+        let (cpim, session) = start_native_session(&entries, -2, b"spim").expect("start");
+        assert_eq!(&*cpim, b"cpim");
+        session.finish(b"ptm", b"tk").expect("finish");
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(END_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 0);
+
+        let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
+        session.destroy().expect("destroy");
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 1);
+
+        END_STATUS.store(1, Ordering::SeqCst);
+        let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
+        assert_eq!(
+            session.finish(b"ptm", b"tk"),
+            Err(BridgeError::EndProvisioningFailed)
+        );
+        assert_eq!(END_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 2);
+
+        END_STATUS.store(0, Ordering::SeqCst);
+        DESTROY_STATUS.store(1, Ordering::SeqCst);
+        let (_, session) = start_native_session(&entries, -2, b"spim").expect("start");
+        assert_eq!(
+            session.destroy(),
+            Err(BridgeError::DestroyProvisioningFailed)
+        );
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn failed_start_disposes_output_without_destroy_or_retry() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_fake_calls();
+        START_STATUS.store(1, Ordering::SeqCst);
+        assert!(matches!(
+            start_native_session(&fake_entries(), -2, b"spim"),
+            Err(BridgeError::StartProvisioningFailed)
+        ));
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(NOOP_DISPOSE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn trailing_transaction_data_is_rejected_before_native_dispatch() {
+        let mut encoded = Vec::new();
+        ipc::write_transaction_command(&mut encoded, &TransactionCommand::Cancel)
+            .expect("cancel frame");
+        encoded.push(0);
+        assert!(matches!(
+            read_transaction_command(&mut std::io::Cursor::new(encoded)),
+            Err(BridgeError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn successful_start_with_invalid_output_destroys_the_session_once() {
+        let _guard = FAKE_TEST_LOCK.lock().expect("test lock");
+        reset_fake_calls();
+        let mut entries = fake_entries();
+        entries.dispose = fake_failing_noop_dispose;
+        assert!(matches!(
+            start_native_session(&entries, -2, b"spim"),
+            Err(BridgeError::HelperFailed)
+        ));
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(NOOP_DISPOSE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 1);
     }
 
     #[test]

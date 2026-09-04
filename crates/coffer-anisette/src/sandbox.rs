@@ -22,10 +22,8 @@
 //! `EPERM`.  Linux Landlock denies filesystem access outside that disposable
 //! directory.  Any failure to apply or verify a layer stops the helper.
 
-use std::ffi::{CString, c_int};
-use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::ffi::c_int;
+use std::os::fd::{FromRawFd as _, OwnedFd};
 
 use crate::error::BridgeError;
 
@@ -120,27 +118,44 @@ pub(crate) fn arm_parent_death() -> Result<(), BridgeError> {
     }
 }
 
+/// Disables diagnostic dumping before any secret request bytes are read.
+#[allow(unsafe_code)]
+pub(crate) fn harden_before_input() -> Result<(), BridgeError> {
+    let core_limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: the live limit only narrows core-file generation.
+    let core_result = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &core_limit) };
+    // SAFETY: the prctl receives documented scalar arguments that disable
+    // dumpability.
+    let dump_result = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if core_result != 0 || dump_result != 0 {
+        return Err(BridgeError::SandboxUnavailable);
+    }
+    Ok(())
+}
+
 /// Applies every mandatory sandbox layer and returns the confined state root.
-pub(crate) fn apply(state_directory: &Path) -> Result<OwnedFd, BridgeError> {
+pub(crate) fn apply(state_directory: OwnedFd) -> Result<OwnedFd, BridgeError> {
     close_inherited_descriptors()?;
     apply_limits()?;
     configure_process()?;
-    apply_landlock(state_directory)?;
-    let state = open_state_directory(state_directory)?;
-    verify_filesystem_boundary(&state)?;
-    install_seccomp(std::os::fd::AsRawFd::as_raw_fd(&state))?;
+    apply_landlock(&state_directory)?;
+    verify_filesystem_boundary(&state_directory)?;
+    install_seccomp(std::os::fd::AsRawFd::as_raw_fd(&state_directory))?;
     verify_network_denied()?;
-    verify_path_syscall_filter(state_directory, &state)?;
+    verify_path_syscall_filter(&state_directory)?;
     verify_cross_process_syscalls_denied()?;
-    Ok(state)
+    Ok(state_directory)
 }
 
 #[allow(unsafe_code)]
 fn close_inherited_descriptors() -> Result<(), BridgeError> {
-    // SAFETY: the helper protocol uses only stdin/stdout.  Closing every
-    // descriptor from 3 upward prevents inherited sockets or secret-bearing
-    // handles from crossing the proprietary execution boundary.
-    let result = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
+    // SAFETY: descriptors 0-2 carry IPC and descriptor 3 is the validated
+    // state capability.  Closing every higher descriptor prevents inherited
+    // sockets or unrelated handles from crossing the proprietary boundary.
+    let result = unsafe { libc::syscall(libc::SYS_close_range, 4u32, u32::MAX, 0u32) };
     if result == 0 {
         Ok(())
     } else {
@@ -190,7 +205,7 @@ fn configure_process() -> Result<(), BridgeError> {
 }
 
 #[allow(unsafe_code)]
-fn apply_landlock(state_directory: &Path) -> Result<(), BridgeError> {
+fn apply_landlock(state_directory: &OwnedFd) -> Result<(), BridgeError> {
     // SAFETY: a null attribute with the VERSION flag is the kernel UAPI query.
     let abi = unsafe {
         libc::syscall(
@@ -223,20 +238,9 @@ fn apply_landlock(state_directory: &Path) -> Result<(), BridgeError> {
         )
     };
     let ruleset = owned_fd(ruleset_raw)?;
-    let directory = CString::new(state_directory.as_os_str().as_bytes())
-        .map_err(|_| BridgeError::SandboxUnavailable)?;
-    // SAFETY: the bounded C string is live; O_PATH opens only a reference used
-    // for the PATH_BENEATH rule and cannot read directory contents.
-    let parent_raw = unsafe {
-        libc::open(
-            directory.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    let parent = owned_fd(parent_raw.into())?;
     let path_attr = LandlockPathBeneathAttr {
         allowed_access: STATE_DIRECTORY_ACCESS & handled,
-        parent_fd: std::os::fd::AsRawFd::as_raw_fd(&parent),
+        parent_fd: std::os::fd::AsRawFd::as_raw_fd(state_directory),
     };
     // SAFETY: both owned descriptors and the exact UAPI rule structure remain
     // live for the calls. `no_new_privs` was irreversibly set first.
@@ -262,21 +266,6 @@ fn apply_landlock(state_directory: &Path) -> Result<(), BridgeError> {
         return Err(BridgeError::SandboxUnavailable);
     }
     Ok(())
-}
-
-#[allow(unsafe_code)]
-fn open_state_directory(state_directory: &Path) -> Result<OwnedFd, BridgeError> {
-    let directory = CString::new(state_directory.as_os_str().as_bytes())
-        .map_err(|_| BridgeError::SandboxUnavailable)?;
-    // SAFETY: the live C string names the already validated state root.  This
-    // descriptor becomes the only pathname capability exposed after seccomp.
-    let raw = unsafe {
-        libc::open(
-            directory.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    owned_fd(raw.into())
 }
 
 #[allow(unsafe_code)]
@@ -366,12 +355,7 @@ fn verify_network_denied() -> Result<(), BridgeError> {
 }
 
 #[allow(unsafe_code)]
-fn verify_path_syscall_filter(
-    state_directory: &Path,
-    state_descriptor: &OwnedFd,
-) -> Result<(), BridgeError> {
-    let absolute = CString::new(state_directory.as_os_str().as_bytes())
-        .map_err(|_| BridgeError::SandboxUnavailable)?;
+fn verify_path_syscall_filter(state_descriptor: &OwnedFd) -> Result<(), BridgeError> {
     // SAFETY: this deliberately presents AT_FDCWD to the constrained openat
     // rule.  The path is otherwise allowed by Landlock, so only the argument
     // filter can produce EPERM.
@@ -379,7 +363,7 @@ fn verify_path_syscall_filter(
         libc::syscall(
             libc::SYS_openat,
             libc::AT_FDCWD,
-            absolute.as_ptr(),
+            c".".as_ptr(),
             libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
             0,
         )
@@ -562,7 +546,6 @@ const ALLOWED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_fstat,
     libc::SYS_getdents64,
     libc::SYS_ftruncate,
-    libc::SYS_umask,
     libc::SYS_arch_prctl,
     libc::SYS_set_tid_address,
     libc::SYS_set_robust_list,
@@ -604,7 +587,6 @@ const ALLOWED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_fstat,
     libc::SYS_getdents64,
     libc::SYS_ftruncate,
-    libc::SYS_umask,
     libc::SYS_set_tid_address,
     libc::SYS_set_robust_list,
     libc::SYS_rseq,
@@ -623,3 +605,37 @@ const ALLOWED_SYSCALLS: &[libc::c_long] = &[];
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const CONSTRAINED_PATH_SYSCALLS: &[libc::c_long] = &[];
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_input_hardening_disables_core_dumps_and_dumpability() {
+        const CHILD: &str = "COFFER_PRE_INPUT_HARDENING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            harden_before_input().expect("harden");
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            // SAFETY: the output slot is live and inspected only after success.
+            let getrlimit_result =
+                unsafe { libc::getrlimit(libc::RLIMIT_CORE, limit.as_mut_ptr()) };
+            assert_eq!(getrlimit_result, 0);
+            // SAFETY: the successful call initialized the complete structure.
+            let limit = unsafe { limit.assume_init() };
+            assert_eq!((limit.rlim_cur, limit.rlim_max), (0, 0));
+            // SAFETY: PR_GET_DUMPABLE has no pointer arguments.
+            assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE) }, 0);
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "sandbox::tests::pre_input_hardening_disables_core_dumps_and_dumpability",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("child test");
+        assert!(status.success());
+    }
+}

@@ -19,16 +19,21 @@
 //! The main Coffer process never maps proprietary Apple code.  It supplies an
 //! [`InstalledLibraries`](coffer_bootstrap::InstalledLibraries) capability to
 //! [`HelperClient`], which starts the dedicated `coffer-anisette-helper`
-//! process and exchanges one bounded, byte-exact request and response.  The
+//! process and exchanges bounded, byte-exact frames.  The
 //! helper revalidates the complete observed ELF ABI policy before mapping the
 //! images with `elf_loader` 0.17.0 and constructors deferred.
 //!
 //! No API in this crate performs provisioning HTTP, Apple Account
-//! authentication, two-factor authentication, or OTP generation.  The only
-//! proprietary-code operation currently exposed is the one-shot offline smoke
-//! boundary: load CoreADI, set a disposable provisioning path, and query
-//! whether the sentinel account identifier is provisioned.  Failures are
-//! terminal for that invocation and are never retried.
+//! authentication, or two-factor authentication.  Typed operations cover the
+//! complete declared ADI surface.  Each ordinary operation uses one helper;
+//! provisioning start and exactly one finish/cancel frame stay in one helper
+//! so the opaque native session handle never crosses IPC.  Failures are
+//! terminal and are never retried.
+//!
+//! [`ProvisioningStore`] binds the helper to
+//! [`BootstrapPaths::provisioning_directory`](coffer_bootstrap::BootstrapPaths::provisioning_directory).
+//! The parent passes a pre-opened private staging descriptor, and successful
+//! state is fsynced and atomically published as a new immutable generation.
 //!
 //! # Provenance
 //!
@@ -45,10 +50,16 @@ mod client;
 mod error;
 mod ipc;
 mod sandbox;
+mod state;
+mod types;
 
 pub use bridge::{AdiOwnedBuffer, PropertyKey};
-pub use client::{HelperClient, SmokeResult, VerifiedLibraryPaths};
+pub use client::{HelperClient, ProvisioningSession, SmokeResult, VerifiedLibraryPaths};
 pub use error::{BridgeError, Stage};
+pub use state::{DeviceIdentifiers, ProvisioningStore};
+pub use types::{
+    AndroidId, DirectoryServiceId, OtpMaterial, SecretBytes, SecretString, SynchronizeMaterial,
+};
 
 /// Runs one helper invocation on stdin/stdout.
 ///

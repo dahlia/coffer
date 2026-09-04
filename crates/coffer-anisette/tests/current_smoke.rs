@@ -18,13 +18,14 @@
 
 use std::time::Duration;
 
-use coffer_anisette::{HelperClient, VerifiedLibraryPaths};
+use coffer_anisette::{HelperClient, ProvisioningStore, VerifiedLibraryPaths};
 use coffer_bootstrap::{AppleCdnSource, Bootstrap, BootstrapPaths};
 
 #[test]
 #[ignore = "must be run explicitly exactly once after all offline gates pass"]
 fn locally_installed_images_complete_the_sandboxed_offline_smoke() {
     let paths = BootstrapPaths::from_environment().expect("resolve XDG paths");
+    let store = ProvisioningStore::from_paths(&paths).expect("provisioning store");
     let bootstrap = Bootstrap::new(paths, AppleCdnSource::new()).expect("supported host");
     let installed = bootstrap
         .installed()
@@ -36,7 +37,7 @@ fn locally_installed_images_complete_the_sandboxed_offline_smoke() {
         Duration::from_secs(15),
     );
     let result = client
-        .offline_smoke(&libraries)
+        .offline_smoke(&libraries, &store)
         .expect("sandboxed offline smoke");
     eprintln!(
         "offline smoke succeeded: provisioned={}, property_classes={:?}",
