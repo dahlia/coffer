@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::escape::resolve_xml_entity;
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -35,17 +36,22 @@ use crate::{BridgeError, DeviceIdentifiers, DirectoryServiceId, SecretBytes};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_XML_FIELDS: usize = 512;
+const MAX_XML_NODES: usize = MAX_XML_FIELDS + 1;
 const MAX_XML_DEPTH: usize = 8;
 const CONTENT_TYPE: &str = "text/x-xml-plist";
 const LOOKUP_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
-const START_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2/midStartProvisioning";
-const FINISH_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning";
+const START_ENDPOINT: &str = "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning";
+const FINISH_ENDPOINT: &str =
+    "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning";
+const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
+const SERIAL_NUMBER_PLACEHOLDER: &str = "0";
 const CLIENT_INFO: &str =
     "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>";
 
 pub(crate) struct ProvisioningContext {
     local_user_id: Zeroizing<String>,
     device_id: Zeroizing<String>,
+    serial_number: &'static str,
     time_zone: String,
     locale: String,
     clock: Arc<dyn Clock>,
@@ -56,6 +62,7 @@ impl ProvisioningContext {
         Self {
             local_user_id: Zeroizing::new(identifiers.local_user_id().expose().to_owned()),
             device_id: Zeroizing::new(identifiers.device_identifier().to_owned()),
+            serial_number: SERIAL_NUMBER_PLACEHOLDER,
             time_zone: context.time_zone.clone(),
             locale: context.locale.clone(),
             clock: Arc::clone(&context.clock),
@@ -71,6 +78,7 @@ impl ProvisioningContext {
         Ok(ProvisioningHeaders {
             local_user_id: Zeroizing::new(self.local_user_id.to_string()),
             device_id: Zeroizing::new(self.device_id.to_string()),
+            serial_number: self.serial_number,
             client_info: CLIENT_INFO,
             client_time: Zeroizing::new(client_time),
             time_zone: &self.time_zone,
@@ -88,6 +96,7 @@ impl fmt::Debug for ProvisioningContext {
 struct ProvisioningHeaders<'a> {
     local_user_id: Zeroizing<String>,
     device_id: Zeroizing<String>,
+    serial_number: &'static str,
     client_info: &'static str,
     client_time: Zeroizing<String>,
     time_zone: &'a str,
@@ -95,11 +104,12 @@ struct ProvisioningHeaders<'a> {
 }
 
 impl ProvisioningHeaders<'_> {
-    fn entries(&self) -> [(&'static str, &str); 6] {
+    fn entries(&self) -> [(&'static str, &str); 7] {
         [
             ("X-Apple-I-MD-LU", &self.local_user_id),
             ("X-Mme-Device-Id", &self.device_id),
             ("X-Mme-Client-Info", self.client_info),
+            ("X-Apple-I-SRL-NO", self.serial_number),
             ("X-Apple-I-Client-Time", &self.client_time),
             ("X-Apple-I-TimeZone", self.time_zone),
             ("X-Apple-Locale", self.locale),
@@ -593,7 +603,8 @@ fn parse_lookup_response(body: &[u8]) -> Result<Lookup, ProvisioningErrorKind> {
 fn parse_start_response(body: &[u8]) -> Result<StartResponse, ProvisioningErrorKind> {
     let root = parse_document(body)?;
     let envelope = root.dict_containing(&["Response"])?;
-    envelope.only_known(&["Response", "Status"])?;
+    envelope.only_known(&["Header", "Response", "Status"])?;
+    validate_optional_empty_header(&envelope)?;
     let response = envelope.get("Response")?.dict_containing(&["spim"])?;
     response.only_known(&["spim", "Status", "X-Apple-I-MD-RINFO"])?;
     validate_optional_routing(&response)?;
@@ -604,7 +615,8 @@ fn parse_start_response(body: &[u8]) -> Result<StartResponse, ProvisioningErrorK
 fn parse_finish_response(body: &[u8]) -> Result<FinishResponse, ProvisioningErrorKind> {
     let root = parse_document(body)?;
     let envelope = root.dict_containing(&["Response"])?;
-    envelope.only_known(&["Response", "Status"])?;
+    envelope.only_known(&["Header", "Response", "Status"])?;
+    validate_optional_empty_header(&envelope)?;
     let response = envelope.get("Response")?.dict_containing(&["ptm", "tk"])?;
     response.only_known(&["ptm", "tk", "Status", "X-Apple-I-MD-RINFO"])?;
     validate_optional_routing(&response)?;
@@ -613,6 +625,13 @@ fn parse_finish_response(body: &[u8]) -> Result<FinishResponse, ProvisioningErro
         ptm: secret_data(response.get("ptm")?)?,
         tk: secret_data(response.get("tk")?)?,
     })
+}
+
+fn validate_optional_empty_header(envelope: &DictRef<'_>) -> Result<(), ProvisioningErrorKind> {
+    if let Some(header) = envelope.optional("Header") {
+        header.dict_containing(&[])?.only_known(&[])?;
+    }
+    Ok(())
 }
 
 fn validate_envelope_status(
@@ -640,6 +659,17 @@ enum Method {
     Post,
 }
 
+fn add_protocol_headers<B>(
+    mut request: ureq::RequestBuilder<B>,
+    headers: &ProvisioningHeaders<'_>,
+) -> ureq::RequestBuilder<B> {
+    request = request.header("content-type", CONTENT_TYPE);
+    for (name, value) in headers.entries() {
+        request = request.header(name, value);
+    }
+    request
+}
+
 fn request(
     url: &str,
     method: Method,
@@ -652,20 +682,8 @@ fn request(
         .ok_or(ProvisioningErrorKind::Transport)?;
     let agent = provisioning_agent(remaining);
     let response = match method {
-        Method::Get => {
-            let mut request = agent.get(url);
-            for (name, value) in headers.entries() {
-                request = request.header(name, value);
-            }
-            request.call()
-        }
-        Method::Post => {
-            let mut request = agent.post(url).header("content-type", CONTENT_TYPE);
-            for (name, value) in headers.entries() {
-                request = request.header(name, value);
-            }
-            request.send(body.unwrap_or(&[]))
-        }
+        Method::Get => add_protocol_headers(agent.get(url), headers).call(),
+        Method::Post => add_protocol_headers(agent.post(url), headers).send(body.unwrap_or(&[])),
     }
     .map_err(classify_transport)?;
     if response.status().as_u16() != 200 {
@@ -700,7 +718,7 @@ fn provisioning_agent(timeout: Duration) -> ureq::Agent {
         .https_only(true)
         .proxy(None)
         .tls_config(gsa_tls_config())
-        .user_agent(concat!("coffer-anisette/", env!("CARGO_PKG_VERSION")))
+        .user_agent(AKD_USER_AGENT)
         .timeout_global(Some(timeout))
         .build();
     ureq::Agent::new_with_config(config)
@@ -751,12 +769,12 @@ fn valid_content_type(value: &str) -> bool {
 }
 
 fn start_request() -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Request</key><dict/></dict></plist>".to_vec())
+    Zeroizing::new(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict/></dict></plist>".to_vec())
 }
 
 fn finish_request(cpim: &[u8]) -> Zeroizing<Vec<u8>> {
-    const PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Request</key><dict><key>cpim</key><data>";
-    const SUFFIX: &[u8] = b"</data></dict></dict></plist>";
+    const PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict><key>cpim</key><string>";
+    const SUFFIX: &[u8] = b"</string></dict></dict></plist>";
     let mut encoded = Zeroizing::new(STANDARD.encode(cpim));
     let capacity = PREFIX.len() + encoded.len() + SUFFIX.len();
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
@@ -772,6 +790,7 @@ enum Node {
     String(Zeroizing<String>),
     Data(Zeroizing<String>),
     Integer(i64),
+    IgnoredStandardValue,
 }
 
 impl Node {
@@ -821,7 +840,7 @@ impl<'a> DictRef<'a> {
 
 fn validate_status(node: &Node) -> Result<(), ProvisioningErrorKind> {
     let status = node.dict_containing(&["ec"])?;
-    status.only_known(&["ec", "em", "au"])?;
+    status.only_known(&["ec", "em", "au", "hsc", "ed", "ptxid", "rsh"])?;
     for name in ["em", "au"] {
         if let Some(value) = status.optional(name)
             && !matches!(value, Node::String(_))
@@ -837,8 +856,9 @@ fn validate_status(node: &Node) -> Result<(), ProvisioningErrorKind> {
 }
 
 fn secret_data(node: &Node) -> Result<SecretBytes, ProvisioningErrorKind> {
-    let Node::Data(value) = node else {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+    let value = match node {
+        Node::String(value) | Node::Data(value) => value,
+        _ => return Err(ProvisioningErrorKind::MalformedResponse),
     };
     let encoded = Zeroizing::new(
         value
@@ -867,11 +887,12 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
         return Err(ProvisioningErrorKind::MalformedResponse);
     }
     let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buffer = Zeroizing::new(Vec::new());
     let mut stack: Vec<Container> = Vec::new();
     let mut root = None;
     let mut fields = 0usize;
+    let mut nodes = 0usize;
     let mut started = false;
     let mut saw_declaration = false;
     let mut saw_doctype = false;
@@ -903,6 +924,10 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             key: None,
                         });
                     }
+                    b"array" => {
+                        validate_attributes(&tag, false)?;
+                        stack.push(Container::Array);
+                    }
                     b"key" => {
                         validate_attributes(&tag, false)?;
                         stack.push(Container::Text(
@@ -931,31 +956,59 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             Zeroizing::new(String::new()),
                         ));
                     }
+                    b"real" => {
+                        validate_attributes(&tag, false)?;
+                        stack.push(Container::Text(
+                            TextKind::Real,
+                            Zeroizing::new(String::new()),
+                        ));
+                    }
+                    b"date" => {
+                        validate_attributes(&tag, false)?;
+                        stack.push(Container::Text(
+                            TextKind::Date,
+                            Zeroizing::new(String::new()),
+                        ));
+                    }
                     _ => return Err(ProvisioningErrorKind::MalformedResponse),
                 }
                 if stack.len() > MAX_XML_DEPTH {
                     return Err(ProvisioningErrorKind::MalformedResponse);
                 }
             }
-            Ok(Event::Empty(tag)) if tag.name().as_ref() == b"dict" => {
+            Ok(Event::Empty(tag)) => {
                 started = true;
                 validate_attributes(&tag, false)?;
-                push_node(&mut stack, &mut root, Node::Dict(Vec::new()))?
+                let node = match tag.name().as_ref() {
+                    b"dict" => Node::Dict(Vec::new()),
+                    b"string" => Node::String(Zeroizing::new(String::new())),
+                    b"data" => Node::Data(Zeroizing::new(String::new())),
+                    b"array" | b"true" | b"false" => Node::IgnoredStandardValue,
+                    _ => return Err(ProvisioningErrorKind::MalformedResponse),
+                };
+                push_node(&mut stack, &mut root, &mut nodes, node)?
             }
             Ok(Event::Text(text)) => {
+                let decoded = text
+                    .decode()
+                    .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+                if let Some(Container::Text(_, value)) = stack.last_mut() {
+                    value.push_str(&decoded);
+                    if value.len() > MAX_RESPONSE_BYTES {
+                        return Err(ProvisioningErrorKind::MalformedResponse);
+                    }
+                } else if !decoded.bytes().all(is_xml_whitespace) {
+                    return Err(ProvisioningErrorKind::MalformedResponse);
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
                 let Container::Text(_, value) = stack
                     .last_mut()
                     .ok_or(ProvisioningErrorKind::MalformedResponse)?
                 else {
                     return Err(ProvisioningErrorKind::MalformedResponse);
                 };
-                let decoded = text
-                    .decode()
-                    .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
-                value.push_str(&decoded);
-                if value.len() > MAX_RESPONSE_BYTES {
-                    return Err(ProvisioningErrorKind::MalformedResponse);
-                }
+                append_reference(&reference, value)?;
             }
             Ok(Event::End(tag)) => {
                 let container = stack
@@ -964,7 +1017,15 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                 match (tag.name().as_ref(), container) {
                     (b"plist", Container::Plist) => {}
                     (b"dict", Container::Dict { values, key: None }) => {
-                        push_node(&mut stack, &mut root, Node::Dict(values))?;
+                        push_node(&mut stack, &mut root, &mut nodes, Node::Dict(values))?;
+                    }
+                    (b"array", Container::Array) => {
+                        push_node(
+                            &mut stack,
+                            &mut root,
+                            &mut nodes,
+                            Node::IgnoredStandardValue,
+                        )?;
                     }
                     (b"key", Container::Text(TextKind::Key, key)) => {
                         let Some(Container::Dict { values, key: slot }) = stack.last_mut() else {
@@ -983,26 +1044,50 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                         }
                     }
                     (b"string", Container::Text(TextKind::String, value)) => {
-                        push_node(&mut stack, &mut root, Node::String(value))?
+                        push_node(&mut stack, &mut root, &mut nodes, Node::String(value))?
                     }
                     (b"data", Container::Text(TextKind::Data, value)) => {
-                        push_node(&mut stack, &mut root, Node::Data(value))?
+                        push_node(&mut stack, &mut root, &mut nodes, Node::Data(value))?
                     }
                     (b"integer", Container::Text(TextKind::Integer, value)) => {
                         let value = value
                             .as_str()
+                            .trim()
                             .parse()
                             .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
-                        push_node(&mut stack, &mut root, Node::Integer(value))?;
+                        push_node(&mut stack, &mut root, &mut nodes, Node::Integer(value))?;
+                    }
+                    (b"real", Container::Text(TextKind::Real, value)) => {
+                        value
+                            .as_str()
+                            .trim()
+                            .parse::<f64>()
+                            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+                        push_node(
+                            &mut stack,
+                            &mut root,
+                            &mut nodes,
+                            Node::IgnoredStandardValue,
+                        )?;
+                    }
+                    (b"date", Container::Text(TextKind::Date, value))
+                        if !value.trim().is_empty() =>
+                    {
+                        push_node(
+                            &mut stack,
+                            &mut root,
+                            &mut nodes,
+                            Node::IgnoredStandardValue,
+                        )?;
                     }
                     _ => return Err(ProvisioningErrorKind::MalformedResponse),
                 }
             }
             Ok(Event::Eof) => break,
-            Ok(Event::Comment(_) | Event::CData(_) | Event::PI(_) | Event::GeneralRef(_)) => {
+            Ok(Event::Comment(_) | Event::CData(_) | Event::PI(_)) => {
                 return Err(ProvisioningErrorKind::MalformedResponse);
             }
-            Ok(Event::Empty(_)) | Err(_) => return Err(ProvisioningErrorKind::MalformedResponse),
+            Err(_) => return Err(ProvisioningErrorKind::MalformedResponse),
         }
         buffer.zeroize();
     }
@@ -1017,6 +1102,8 @@ enum TextKind {
     String,
     Data,
     Integer,
+    Real,
+    Date,
 }
 
 enum Container {
@@ -1025,7 +1112,42 @@ enum Container {
         values: Vec<(String, Node)>,
         key: Option<String>,
     },
+    Array,
     Text(TextKind, Zeroizing<String>),
+}
+
+fn append_reference(
+    reference: &BytesRef<'_>,
+    value: &mut String,
+) -> Result<(), ProvisioningErrorKind> {
+    let decoded = reference
+        .decode()
+        .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+    if let Some(entity) = resolve_xml_entity(&decoded) {
+        value.push_str(entity);
+    } else {
+        let character = reference
+            .resolve_char_ref()
+            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?
+            .filter(|character| is_valid_xml_character(*character))
+            .ok_or(ProvisioningErrorKind::MalformedResponse)?;
+        value.push(character);
+    }
+    if value.len() > MAX_RESPONSE_BYTES {
+        return Err(ProvisioningErrorKind::MalformedResponse);
+    }
+    Ok(())
+}
+
+fn is_valid_xml_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
+fn is_xml_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 fn validate_attributes(tag: &BytesStart<'_>, plist: bool) -> Result<(), ProvisioningErrorKind> {
@@ -1049,11 +1171,20 @@ fn validate_attributes(tag: &BytesStart<'_>, plist: bool) -> Result<(), Provisio
 fn push_node(
     stack: &mut [Container],
     root: &mut Option<Node>,
+    nodes: &mut usize,
     node: Node,
 ) -> Result<(), ProvisioningErrorKind> {
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or(ProvisioningErrorKind::MalformedResponse)?;
+    if *nodes > MAX_XML_NODES {
+        return Err(ProvisioningErrorKind::MalformedResponse);
+    }
     if let Some(Container::Dict { values, key }) = stack.last_mut() {
         let key = key.take().ok_or(ProvisioningErrorKind::MalformedResponse)?;
         values.push((key, node));
+        Ok(())
+    } else if matches!(stack.last(), Some(Container::Array)) {
         Ok(())
     } else if matches!(stack.last(), Some(Container::Plist)) && root.is_none() {
         *root = Some(node);
@@ -1067,6 +1198,22 @@ fn push_node(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    const CAPTURED_START_ENDPOINT: &str =
+        "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning";
+    const CAPTURED_FINISH_ENDPOINT: &str =
+        "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning";
+
+    fn lookup_with_endpoints(start: &str, finish: &str) -> Vec<u8> {
+        format!(
+            "<plist version=\"1.0\"><dict><key>urls</key><dict><key>midStartProvisioning</key><string>{start}</string><key>midFinishProvisioning</key><string>{finish}</string></dict></dict></plist>"
+        )
+        .into_bytes()
+    }
+
+    fn synthetic_url(scheme: &str, remainder: &str) -> String {
+        format!("{scheme}:{}{}", "/", format_args!("/{remainder}"))
+    }
 
     #[test]
     fn provisioning_agent_uses_only_apples_root() {
@@ -1116,7 +1263,7 @@ mod tests {
 
     #[test]
     fn lookup_fixture_is_exact_and_strict() {
-        let lookup = b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Response</key><dict><key>urls</key><dict><key>midStartProvisioning</key><string>https://gsa.apple.com/grandslam/GsService2/midStartProvisioning</string><key>midFinishProvisioning</key><string>https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning</string></dict></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        let lookup = b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Response</key><dict><key>urls</key><dict><key>midStartProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/startMachineProvisioning</string><key>midFinishProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning</string></dict></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
         parse_lookup_response(lookup).expect("wrapped lookup");
         let root = parse_document(lookup).expect("parse");
         let response = root.dict_containing(&["Response", "Status"]).expect("root");
@@ -1152,8 +1299,223 @@ mod tests {
             Err(ProvisioningErrorKind::MalformedResponse)
         ));
 
-        let directory = b"<plist version=\"1.0\"><dict><key>urls</key><dict><key>unrelated</key><string>unused</string><key>midStartProvisioning</key><string>https://gsa.apple.com/grandslam/GsService2/midStartProvisioning</string><key>midFinishProvisioning</key><string>https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning</string></dict><key>extra</key><string>bounded</string></dict></plist>";
+        let directory = b"<plist version=\"1.0\"><dict><key>urls</key><dict><key>unrelated</key><string>unused</string><key>midStartProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/startMachineProvisioning</string><key>midFinishProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning</string></dict><key>extra</key><string>bounded</string></dict></plist>";
         parse_lookup_response(directory).expect("top-level directory with bounded extras");
+    }
+
+    #[test]
+    fn lookup_accepts_realistic_standard_values_and_entities() {
+        let mut extras = String::new();
+        for index in 0..150 {
+            extras.push_str(&format!(
+                "<key>synthetic-{index}</key><string>bounded &amp; inert</string>"
+            ));
+        }
+        let document = format!(
+            "<?xml version=\"1.0\"?><!DOCTYPE plist><plist version=\"1.0\"><dict><key>empty-string</key><string/><key>empty-data</key><data/><key>enabled</key><true/><key>disabled</key><false/><key>ratio</key><real>1.25</real><key>timestamp</key><date>2026-09-11T00:00:00Z</date><key>items</key><array><string>one</string><integer>2</integer><true/><dict/><array/></array>{extras}<key>urls</key><dict><key>midStartProvisioning</key><string>{CAPTURED_START_ENDPOINT}</string><key>midFinishProvisioning</key><string>{CAPTURED_FINISH_ENDPOINT}</string></dict><key>Status</key><dict><key>hsc</key><integer>200</integer><key>ed</key><string>success</string><key>ec</key><integer>0</integer><key>em</key><string></string><key>ptxid</key><string>synthetic-transaction</string><key>rsh</key><string>synthetic-routing</string></dict></dict></plist>"
+        );
+        let lookup = parse_lookup_response(document.as_bytes()).expect("realistic lookup bag");
+        assert_eq!(lookup.start_endpoint.value(), CAPTURED_START_ENDPOINT);
+        assert_eq!(lookup.finish_endpoint.value(), CAPTURED_FINISH_ENDPOINT);
+    }
+
+    #[test]
+    fn provisioning_endpoint_allowlists_are_role_exact() {
+        let valid = lookup_with_endpoints(CAPTURED_START_ENDPOINT, CAPTURED_FINISH_ENDPOINT);
+        parse_lookup_response(&valid).expect("captured MidService endpoints");
+
+        for invalid_start in [
+            synthetic_url(
+                "http",
+                "gsa.apple.com/grandslam/MidService/startMachineProvisioning",
+            ),
+            synthetic_url(
+                "https",
+                "evil.example/grandslam/MidService/startMachineProvisioning",
+            ),
+            CAPTURED_FINISH_ENDPOINT.to_owned(),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/startMachineProvisioning/",
+            ),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/startMachineProvisioning?x=1",
+            ),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/startMachineProvisioning#x",
+            ),
+        ] {
+            assert!(matches!(
+                parse_lookup_response(&lookup_with_endpoints(
+                    &invalid_start,
+                    CAPTURED_FINISH_ENDPOINT
+                )),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
+        for invalid_finish in [
+            synthetic_url(
+                "http",
+                "gsa.apple.com/grandslam/MidService/finishMachineProvisioning",
+            ),
+            synthetic_url(
+                "https",
+                "evil.example/grandslam/MidService/finishMachineProvisioning",
+            ),
+            CAPTURED_START_ENDPOINT.to_owned(),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/finishMachineProvisioning/",
+            ),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/finishMachineProvisioning?x=1",
+            ),
+            synthetic_url(
+                "https",
+                "gsa.apple.com/grandslam/MidService/finishMachineProvisioning#x",
+            ),
+        ] {
+            assert!(matches!(
+                parse_lookup_response(&lookup_with_endpoints(
+                    CAPTURED_START_ENDPOINT,
+                    &invalid_finish
+                )),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn ignored_standard_nodes_cannot_supply_required_values() {
+        for value in [
+            "<data>aHR0cHM6Ly9nc2EuYXBwbGUuY29tLw==</data>",
+            "<integer>1</integer>",
+            "<true/>",
+            "<real>1.0</real>",
+            "<date>2026-09-11T00:00:00Z</date>",
+            "<array/>",
+            "<dict/>",
+        ] {
+            let document = format!(
+                "<plist version=\"1.0\"><dict><key>urls</key><dict><key>midStartProvisioning</key>{value}<key>midFinishProvisioning</key><string>{CAPTURED_FINISH_ENDPOINT}</string></dict></dict></plist>"
+            );
+            assert!(matches!(
+                parse_lookup_response(document.as_bytes()),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
+
+        let wrong_spim = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><array/></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(wrong_spim),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+    }
+
+    #[test]
+    fn xml_references_are_bounded_and_restricted() {
+        let node = parse_document(
+            b"<plist version=\"1.0\"><string>&amp;&lt;&gt;&apos;&quot;&#65;&#x1F642;</string></plist>",
+        )
+        .expect("predefined and numeric references");
+        assert_eq!(node.string().expect("string"), "&<>'\"A🙂");
+        let spaced =
+            parse_document(b"<plist version=\"1.0\"><string>bounded &amp; inert</string></plist>")
+                .expect("reference whitespace");
+        assert_eq!(spaced.string().expect("string"), "bounded & inert");
+        let distinct_keys = parse_document(
+            b"<plist version=\"1.0\"><dict><key>a &amp; b</key><string/><key>a&amp;b</key><string/></dict></plist>",
+        )
+        .expect("distinct decoded keys");
+        let distinct_keys = distinct_keys.dict_containing(&[]).expect("dictionary");
+        distinct_keys.get("a & b").expect("spaced key");
+        distinct_keys.get("a&b").expect("unspaced key");
+
+        for invalid in [
+            b"<plist version=\"1.0\"><string>&custom;</string></plist>".as_slice(),
+            b"<plist version=\"1.0\"><string>&#0;</string></plist>".as_slice(),
+            b"<plist version=\"1.0\"><string>&#1;</string></plist>".as_slice(),
+            b"<!DOCTYPE plist [<!ENTITY custom \"x\">]><plist version=\"1.0\"><string>&custom;</string></plist>".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_document(invalid),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
+        let external_entity = format!(
+            "<!DOCTYPE plist [<!ENTITY external SYSTEM \"{}:{}//etc/passwd\">]><plist version=\"1.0\"><string>&external;</string></plist>",
+            "file", "/"
+        );
+        assert!(matches!(
+            parse_document(external_entity.as_bytes()),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_unknown_markup_and_attributes() {
+        for invalid in [
+            b"<plist version=\"1.0\"><set/></plist>".as_slice(),
+            b"<plist version=\"1.0\"><array extra=\"x\"/></plist>".as_slice(),
+            b"<plist version=\"1.0\"><!-- no comments --><dict/></plist>".as_slice(),
+            b"<plist version=\"1.0\"><string><![CDATA[x]]></string></plist>".as_slice(),
+            b"<plist version=\"1.0\"><?target x?><dict/></plist>".as_slice(),
+            b"<plist version=\"1.0\"><dict/>stray</plist>".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_document(invalid),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn field_depth_node_and_body_bounds_hold() {
+        let mut at_field_limit = String::from("<plist version=\"1.0\"><dict>");
+        for index in 0..MAX_XML_FIELDS {
+            at_field_limit.push_str(&format!("<key>k{index}</key><string/>"));
+        }
+        at_field_limit.push_str("</dict></plist>");
+        parse_document(at_field_limit.as_bytes()).expect("inclusive field and node limit");
+
+        let over_field_limit = at_field_limit.replacen(
+            "</dict>",
+            &format!("<key>k{MAX_XML_FIELDS}</key><string/></dict>"),
+            1,
+        );
+        assert!(matches!(
+            parse_document(over_field_limit.as_bytes()),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+
+        let mut at_node_limit = String::from("<plist version=\"1.0\"><array>");
+        for _ in 0..MAX_XML_FIELDS {
+            at_node_limit.push_str("<string/>");
+        }
+        at_node_limit.push_str("</array></plist>");
+        parse_document(at_node_limit.as_bytes()).expect("inclusive completed-node limit");
+        let over_node_limit = at_node_limit.replacen("</array>", "<string/></array>", 1);
+        assert!(matches!(
+            parse_document(over_node_limit.as_bytes()),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+
+        let too_deep = format!(
+            "<plist version=\"1.0\">{}<array/>{}</plist>",
+            "<array>".repeat(MAX_XML_DEPTH),
+            "</array>".repeat(MAX_XML_DEPTH)
+        );
+        assert!(matches!(
+            parse_document(too_deep.as_bytes()),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+        assert!(matches!(
+            parse_document(&vec![b'x'; MAX_RESPONSE_BYTES + 1]),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
     }
 
     #[test]
@@ -1161,16 +1523,43 @@ mod tests {
         let context = context();
         let headers = context.headers().expect("headers");
         assert_eq!(
-            headers.entries(),
+            headers.entries().as_slice(),
             [
                 ("X-Apple-I-MD-LU", "local-user"),
                 ("X-Mme-Device-Id", "device-id"),
                 ("X-Mme-Client-Info", CLIENT_INFO),
+                ("X-Apple-I-SRL-NO", "0"),
                 ("X-Apple-I-Client-Time", "2026-09-04T00:00:00Z"),
                 ("X-Apple-I-TimeZone", "UTC"),
                 ("X-Apple-Locale", "en_US"),
             ]
+            .as_slice()
         );
+        assert!(matches!(
+            provisioning_agent(Duration::from_secs(30))
+                .config()
+                .user_agent(),
+            ureq::config::AutoHeaderValue::Provided(value) if value.as_str() == "akd/1.0 CFNetwork/808.1.4"
+        ));
+        let agent = provisioning_agent(Duration::from_secs(30));
+        let lookup_request = add_protocol_headers(agent.get(LOOKUP_ENDPOINT), &headers);
+        let request_headers = lookup_request.headers_ref().expect("lookup headers");
+        assert_eq!(
+            request_headers
+                .get("content-type")
+                .expect("content type")
+                .as_bytes(),
+            CONTENT_TYPE.as_bytes()
+        );
+        for (name, value) in headers.entries() {
+            assert_eq!(
+                request_headers
+                    .get(name)
+                    .expect("provisioning header")
+                    .as_bytes(),
+                value.as_bytes()
+            );
+        }
         assert_eq!(format!("{context:?}"), "ProvisioningContext(<redacted>)");
     }
 
@@ -1201,6 +1590,16 @@ mod tests {
             ))),
             Err(ProvisioningErrorKind::MalformedResponse)
         ));
+        for invalid in [
+            String::new(),
+            "c2VjcmV0!".to_owned(),
+            "A".repeat(4 * 1024 * 1024 / 3 + 9),
+        ] {
+            assert!(matches!(
+                secret_data(&Node::String(Zeroizing::new(invalid))),
+                Err(ProvisioningErrorKind::MalformedResponse)
+            ));
+        }
         let failure = Node::Dict(vec![("ec".to_owned(), Node::Integer(7))]);
         assert_eq!(
             validate_status(&failure),
@@ -1278,9 +1677,53 @@ mod tests {
     }
 
     #[test]
+    fn start_and_finish_accept_full_envelopes_and_string_secrets() {
+        let start = b"<plist version=\"1.0\"><dict><key>Header</key><dict/><key>Response</key><dict><key>spim</key><string>c3BpbQ==</string></dict><key>Status</key><dict><key>hsc</key><integer>200</integer><key>ed</key><string>success</string><key>ec</key><integer>0</integer><key>em</key><string></string><key>ptxid</key><string>synthetic-transaction</string><key>rsh</key><string>synthetic-routing</string><key>au</key><string>synthetic-auth</string></dict></dict></plist>";
+        let StartResponse(spim) = parse_start_response(start).expect("full start envelope");
+        assert_eq!(spim.expose(), b"spim");
+
+        let indented_start = br#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>Header</key>
+    <dict/>
+    <key>Response</key>
+    <dict>
+      <key>spim</key>
+      <string>c3BpbQ==</string>
+    </dict>
+    <key>Status</key>
+    <dict>
+      <key>ec</key>
+      <integer>0</integer>
+    </dict>
+  </dict>
+</plist>"#;
+        let StartResponse(spim) =
+            parse_start_response(indented_start).expect("indented start envelope");
+        assert_eq!(spim.expose(), b"spim");
+
+        let finish = b"<plist version=\"1.0\"><dict><key>Header</key><dict/><key>Response</key><dict><key>ptm</key><string>cHRt</string><key>tk</key><string>dGs=</string></dict><key>Status</key><dict><key>hsc</key><integer>200</integer><key>ed</key><string>success</string><key>ec</key><integer>0</integer><key>em</key><string></string><key>ptxid</key><string>synthetic-transaction</string><key>rsh</key><string>synthetic-routing</string></dict></dict></plist>";
+        let finish = parse_finish_response(finish).expect("full finish envelope");
+        assert_eq!(finish.ptm.expose(), b"ptm");
+        assert_eq!(finish.tk.expose(), b"tk");
+
+        let nonempty_header = b"<plist version=\"1.0\"><dict><key>Header</key><dict><key>extra</key><string>x</string></dict><key>Response</key><dict><key>spim</key><string>c3BpbQ==</string></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(nonempty_header),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+        let wrong_em_type = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><string>c3BpbQ==</string></dict><key>Status</key><dict><key>ec</key><integer>0</integer><key>em</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(wrong_em_type),
+            Err(ProvisioningErrorKind::MalformedResponse)
+        ));
+    }
+
+    #[test]
     fn wire_requests_are_byte_exact_and_secret_safe() {
-        assert_eq!(&*start_request(), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Request</key><dict/></dict></plist>");
-        assert_eq!(&*finish_request(b"cpim"), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Request</key><dict><key>cpim</key><data>Y3BpbQ==</data></dict></dict></plist>");
+        assert_eq!(&*start_request(), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict/></dict></plist>");
+        assert_eq!(&*finish_request(b"cpim"), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict><key>cpim</key><string>Y3BpbQ==</string></dict></dict></plist>");
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1363,6 +1806,7 @@ mod tests {
         ProvisioningContext {
             local_user_id: Zeroizing::new("local-user".to_owned()),
             device_id: Zeroizing::new("device-id".to_owned()),
+            serial_number: SERIAL_NUMBER_PLACEHOLDER,
             time_zone: "UTC".to_owned(),
             locale: "en_US".to_owned(),
             clock: Arc::new(TestClock),

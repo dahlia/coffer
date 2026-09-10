@@ -519,8 +519,8 @@ fn apple_endpoint_urls_are_allowlisted(path: &Path, line: &str) -> bool {
     }
     let allowed = [
         "https://gsa.apple.com/grandslam/GsService2/lookup",
-        "https://gsa.apple.com/grandslam/GsService2/midStartProvisioning",
-        "https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning",
+        "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning",
+        "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning",
     ];
     let urls = urls_in_line(line);
     !urls.is_empty() && urls.iter().all(|url| allowed.contains(url))
@@ -878,19 +878,22 @@ mod tests {
             Err(CheckError("a remote-provider URL literal entered source"))
         );
         let provisioning_path = Path::new("crates/coffer-anisette/src/provision.rs");
-        assert!(
-            verify_source_text(
-                provisioning_path,
-                "const URL: &str = \"https://gsa.apple.com/grandslam/GsService2/lookup\";"
-            )
-            .is_ok()
-        );
+        for allowed in [
+            "https://gsa.apple.com/grandslam/GsService2/lookup",
+            "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning",
+            "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning",
+        ] {
+            let source = format!("const URL: &str = \"{allowed}\";");
+            assert!(verify_source_text(provisioning_path, &source).is_ok());
+        }
         for injected in [
             "http://gsa.apple.com/grandslam/GsService2/lookup",
             "https://example.invalid/grandslam/GsService2/lookup",
             "https://gsa.apple.com.evil.invalid/grandslam/GsService2/lookup",
             "https://gsa.apple.com/grandslam/GsService2/lookup/extra",
             "https://gsa.apple.com/grandslam/GsService2/lookup?next=evil",
+            "https://gsa.apple.com/grandslam/GsService2/midStartProvisioning",
+            "https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning",
         ] {
             let source = format!("const URL: &str = \"{injected}\";");
             assert_eq!(
