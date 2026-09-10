@@ -39,7 +39,10 @@ What one run does
 
 Every step runs once. Any failure stops the run with a static, stage-labelled
 message. Nothing is retried, no redirect or proxy is followed, and there is no
-remote anisette or plaintext fallback anywhere in the graph.
+remote anisette or plaintext fallback anywhere in the graph. Connections to
+the fixed `gsa.apple.com` endpoints use Apple's published “Apple Inc. Root” as
+their sole trust anchor while retaining certificate and hostname verification;
+the Apple CDN bootstrap continues to use the public WebPKI.
 
 
 Human interaction points

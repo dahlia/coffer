@@ -41,3 +41,8 @@ plist = { version = "1.10.0", default-features = false }
 srp = { version = "=0.7.0-rc.3", default-features = false }
 # Passwords, codes, keys, and tokens are wiped on drop.
 zeroize = "1.9.0"
+
+[dev-dependencies]
+# Validate that the embedded Apple root is a parseable trust anchor.  This is
+# already in the workspace graph through ureq and does not enter the library.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }

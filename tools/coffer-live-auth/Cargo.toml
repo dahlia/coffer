@@ -34,10 +34,13 @@ rustix = { version = "1.1.4", default-features = false, features = ["fs", "proce
 # has been restored.  Pinned exactly; default features (channel, iterator)
 # are unused and disabled.  MIT OR Apache-2.0.
 signal-hook = { version = "=0.4.4", default-features = false }
-# Blocking HTTPS for the GSA transport with the same policy `coffer-anisette`
-# and `coffer-bootstrap` use: rustls with Mozilla's roots, no redirects, no
-# proxy, one bounded exchange per call.
+# Blocking HTTPS for the GSA transport with the same endpoint-specific policy
+# `coffer-anisette` uses: rustls with Apple's published root as the sole trust
+# anchor, no redirects, no proxy, one bounded exchange per call.
 ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+# Identify rustls errors that ureq wraps in std::io::Error during a handshake.
+# ureq already selects the same rustls version and ring provider.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 zeroize = "1.9.0"
 
 [dev-dependencies]

@@ -26,6 +26,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client::NativeTerminalError;
@@ -158,6 +159,8 @@ pub enum ProvisioningStage {
 pub enum ProvisioningErrorKind {
     /// HTTPS transport failed or exceeded the absolute deadline.
     Transport,
+    /// TLS negotiation or certificate verification failed.
+    Tls,
     /// The endpoint returned a redirect.
     Redirect,
     /// The endpoint returned an authentication challenge.
@@ -647,15 +650,7 @@ fn request(
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or(ProvisioningErrorKind::Transport)?;
-    let config = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .max_redirects_will_error(true)
-        .http_status_as_error(true)
-        .proxy(None)
-        .user_agent(concat!("coffer-anisette/", env!("CARGO_PKG_VERSION")))
-        .timeout_global(Some(remaining))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+    let agent = provisioning_agent(remaining);
     let response = match method {
         Method::Get => {
             let mut request = agent.get(url);
@@ -697,8 +692,39 @@ fn request(
     Ok(bytes)
 }
 
+fn provisioning_agent(timeout: Duration) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .max_redirects_will_error(true)
+        .http_status_as_error(true)
+        .https_only(true)
+        .proxy(None)
+        .tls_config(gsa_tls_config())
+        .user_agent(concat!("coffer-anisette/", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(timeout))
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+fn gsa_tls_config() -> TlsConfig {
+    let certificate = Certificate::from_der(coffer_protocol::pki::APPLE_INC_ROOT_CA_DER);
+    TlsConfig::builder()
+        .root_certs(RootCerts::new_with_certs(&[certificate]))
+        .use_sni(true)
+        .disable_verification(false)
+        .build()
+}
+
 fn classify_transport(error: ureq::Error) -> ProvisioningErrorKind {
     match error {
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => ProvisioningErrorKind::Tls,
+        ureq::Error::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<rustls::Error>()) =>
+        {
+            ProvisioningErrorKind::Tls
+        }
         ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => {
             ProvisioningErrorKind::Redirect
         }
@@ -1041,6 +1067,52 @@ fn push_node(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn provisioning_agent_uses_only_apples_root() {
+        let agent = provisioning_agent(Duration::from_secs(30));
+        let config = agent.config();
+        let tls = config.tls_config();
+        let RootCerts::Specific(certificates) = tls.root_certs() else {
+            panic!("GSA provisioning must use endpoint-specific roots");
+        };
+
+        assert_eq!(certificates.len(), 1);
+        assert_eq!(
+            certificates[0].der(),
+            coffer_protocol::pki::APPLE_INC_ROOT_CA_DER
+        );
+        assert!(tls.use_sni());
+        assert!(!tls.disable_verification());
+        assert!(config.https_only());
+        assert_eq!(config.max_redirects(), 0);
+        assert!(config.max_redirects_will_error());
+        assert!(config.proxy().is_none());
+        assert!(config.http_status_as_error());
+    }
+
+    #[test]
+    fn tls_failures_are_distinct_and_secret_free() {
+        assert_eq!(
+            classify_transport(ureq::Error::Tls("server-controlled detail")),
+            ProvisioningErrorKind::Tls
+        );
+        let certificate_error =
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        assert_eq!(
+            classify_transport(ureq::Error::Rustls(certificate_error.clone())),
+            ProvisioningErrorKind::Tls
+        );
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, certificate_error);
+        assert_eq!(
+            classify_transport(ureq::Error::Io(wrapped)),
+            ProvisioningErrorKind::Tls
+        );
+        assert_eq!(
+            classify_transport(ureq::Error::ConnectionFailed),
+            ProvisioningErrorKind::Transport
+        );
+    }
 
     #[test]
     fn lookup_fixture_is_exact_and_strict() {

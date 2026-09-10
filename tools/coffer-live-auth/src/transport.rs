@@ -27,8 +27,9 @@
 //!   no proxy, and no response to an authentication challenge: a `3xx`, `401`,
 //!   or `407` status is reported as a transport failure without reading its
 //!   body, and every other status is handed to the protocol layer as is.
-//! - TLS uses rustls with Mozilla's root bundle, the same trust policy
-//!   `coffer-bootstrap` applies to Apple's content delivery network.
+//! - TLS uses rustls with Apple's published “Apple Inc. Root” as the only
+//!   trust anchor.  This policy is private to the fixed GSA endpoints; the
+//!   Apple CDN transport continues to use the public WebPKI.
 //! - The response body is read through a hard cap of
 //!   [`Request::max_response_body`] bytes and every exchange runs under both a
 //!   per-exchange timeout and a deadline for the whole harness run.
@@ -43,6 +44,7 @@ use std::time::{Duration, Instant};
 use coffer_protocol::auth::{GSA_ENDPOINT, TRUSTED_DEVICE_ENDPOINT, VALIDATE_ENDPOINT};
 use coffer_protocol::transport::{Method, Request, Response, Transport, TransportError};
 use ureq::config::AutoHeaderValue;
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 /// The only `Content-Type` GSA requests carry.
 pub const PLIST_CONTENT_TYPE: &str = "text/x-xml-plist";
@@ -264,11 +266,21 @@ impl UreqExchange {
             .accept(AutoHeaderValue::None)
             .accept_encoding(AutoHeaderValue::None)
             .timeout_connect(Some(CONNECT_TIMEOUT))
+            .tls_config(gsa_tls_config())
             .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
         }
     }
+}
+
+fn gsa_tls_config() -> TlsConfig {
+    let certificate = Certificate::from_der(coffer_protocol::pki::APPLE_INC_ROOT_CA_DER);
+    TlsConfig::builder()
+        .root_certs(RootCerts::new_with_certs(&[certificate]))
+        .use_sni(true)
+        .disable_verification(false)
+        .build()
 }
 
 impl Default for UreqExchange {
@@ -343,9 +355,18 @@ impl fmt::Debug for UreqExchange {
 fn classify_ureq_error(error: &ureq::Error, limit: usize) -> TransportError {
     match error {
         ureq::Error::Timeout(_) => TransportError::Timeout,
-        ureq::Error::Tls(_) => TransportError::Tls {
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => TransportError::Tls {
             detail: "TLS handshake or certificate verification failed".to_owned(),
         },
+        ureq::Error::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<rustls::Error>()) =>
+        {
+            TransportError::Tls {
+                detail: "TLS handshake or certificate verification failed".to_owned(),
+            }
+        }
         ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::Io(_) => {
             TransportError::Connect {
                 detail: "connection failed".to_owned(),
@@ -645,6 +666,21 @@ pub(crate) mod tests {
                 detail: "TLS handshake or certificate verification failed".to_owned()
             }
         );
+        let certificate_error =
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        assert_eq!(
+            classify_ureq_error(&ureq::Error::Rustls(certificate_error.clone()), 1),
+            TransportError::Tls {
+                detail: "TLS handshake or certificate verification failed".to_owned()
+            }
+        );
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, certificate_error);
+        assert_eq!(
+            classify_ureq_error(&ureq::Error::Io(wrapped), 1),
+            TransportError::Tls {
+                detail: "TLS handshake or certificate verification failed".to_owned()
+            }
+        );
         assert_eq!(
             classify_ureq_error(&ureq::Error::BodyExceedsLimit(9), 77),
             TransportError::ResponseTooLarge { limit: 77 }
@@ -667,9 +703,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn production_agent_has_no_redirects_or_proxy() {
-        let exchange = UreqExchange::new();
-        let config = exchange.agent.config();
+    fn production_agent_uses_only_apples_root_without_redirects_or_proxy() {
+        let transport = GsaTransport::production(deadlines());
+        let config = transport.exchange_ref().agent.config();
+        let tls = config.tls_config();
+        let RootCerts::Specific(certificates) = tls.root_certs() else {
+            panic!("GSA authentication must use endpoint-specific roots");
+        };
+
+        assert_eq!(certificates.len(), 1);
+        assert_eq!(
+            certificates[0].der(),
+            coffer_protocol::pki::APPLE_INC_ROOT_CA_DER
+        );
+        assert!(tls.use_sni());
+        assert!(!tls.disable_verification());
         assert_eq!(config.max_redirects(), 0);
         assert!(config.proxy().is_none());
         assert!(!config.http_status_as_error());
@@ -677,6 +725,5 @@ pub(crate) mod tests {
         assert!(matches!(config.user_agent(), AutoHeaderValue::None));
         assert!(matches!(config.accept(), AutoHeaderValue::None));
         assert!(matches!(config.accept_encoding(), AutoHeaderValue::None));
-        assert!(!config.tls_config().disable_verification());
     }
 }

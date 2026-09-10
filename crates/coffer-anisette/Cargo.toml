@@ -23,6 +23,9 @@ elf = { version = "=0.8.0", default-features = false }
 libc = "0.2.189"
 omnisette-local = { path = "../omnisette-local" }
 quick-xml = { version = "0.41.0", default-features = false }
+# Identify rustls errors that ureq wraps in std::io::Error during a handshake.
+# ureq already selects the same rustls version and ring provider.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 sha2 = { version = "0.11.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["formatting", "std"] }

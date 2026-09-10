@@ -327,6 +327,7 @@ fn provisioning_stage_label(stage: ProvisioningStage) -> &'static str {
 fn provisioning_kind_label(kind: ProvisioningErrorKind) -> &'static str {
     match kind {
         ProvisioningErrorKind::Transport => "transport failed or the deadline passed",
+        ProvisioningErrorKind::Tls => "TLS handshake or certificate verification failed",
         ProvisioningErrorKind::Redirect => "the endpoint answered with a redirect; refused",
         ProvisioningErrorKind::AuthenticationChallenge => {
             "the endpoint answered with an authentication challenge; refused"
@@ -604,6 +605,14 @@ mod tests {
         assert!(text.starts_with("Secret Service is not usable, nothing was attempted"));
         let text = HarnessError::SlotState(SlotStateError::Corrupt).to_string();
         assert!(!text.contains('/'));
+        let (_, kind) = HarnessError::Anisette(AnisetteStageError::Provisioning(
+            crate::anisette::ProvisioningFailure {
+                stage: ProvisioningStage::Lookup,
+                kind: ProvisioningErrorKind::Tls,
+            },
+        ))
+        .labels();
+        assert_eq!(kind, "TLS handshake or certificate verification failed");
     }
 
     #[test]
