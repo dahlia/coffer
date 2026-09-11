@@ -56,6 +56,7 @@ const OMNISETTE_UPSTREAM_COMMIT: &str = "03beb1aa42991ccdad6214dee77e72282bef461
 pub struct ProvisioningStore {
     root: PathBuf,
     binding: Option<String>,
+    existing_only: bool,
 }
 
 impl ProvisioningStore {
@@ -79,6 +80,7 @@ impl ProvisioningStore {
         Ok(Self {
             root,
             binding: None,
+            existing_only: false,
         })
     }
 
@@ -111,6 +113,9 @@ impl ProvisioningStore {
         if let Some(bytes) = read_identifier(&self.root)? {
             return DeviceIdentifiers::from_bytes(bytes);
         }
+        if self.existing_only {
+            return Err(BridgeError::StateMissing);
+        }
         let _lock = self.lock_until(None)?;
         let bytes = match read_identifier(&self.root)? {
             Some(bytes) => bytes,
@@ -122,6 +127,11 @@ impl ProvisioningStore {
             }
         };
         DeviceIdentifiers::from_bytes(bytes)
+    }
+
+    pub(crate) fn existing_only(mut self) -> Self {
+        self.existing_only = true;
+        self
     }
 
     pub(crate) fn prepare(&self, deadline: Instant) -> Result<PreparedGeneration, BridgeError> {
@@ -142,13 +152,30 @@ impl ProvisioningStore {
     ) -> Result<PreparedGeneration, BridgeError> {
         check_deadline(deadline)?;
         let lock = self.lock_until(Some(deadline))?;
+        // Check before staging cleanup/creation: a resumed caller cannot turn
+        // missing provisioning into a fresh empty native generation.
+        let existing_active = if self.existing_only {
+            read_identifier(&self.root)?.ok_or(BridgeError::StateMissing)?;
+            let active =
+                active_generation(&self.root, Some(deadline))?.ok_or(BridgeError::StateMissing)?;
+            if let Some(binding) = &self.binding {
+                validate_binding(&self.root, &active, binding)?;
+            }
+            Some(active)
+        } else {
+            None
+        };
         let staging_root = self.root.join(STAGING_DIRECTORY);
         let generations_root = self.root.join(GENERATIONS_DIRECTORY);
         create_private_directory(&staging_root)?;
         create_private_directory(&generations_root)?;
         check_deadline(deadline)?;
         clean_staging(&staging_root, deadline)?;
-        let active = active_generation(&self.root, Some(deadline))?;
+        let active = if self.existing_only {
+            existing_active
+        } else {
+            active_generation(&self.root, Some(deadline))?
+        };
         let copy_active = match (active.as_ref(), self.binding.as_ref()) {
             (Some(active), Some(binding)) => match validate_binding(&self.root, active, binding) {
                 Ok(()) => true,
@@ -195,26 +222,31 @@ impl ProvisioningStore {
 
     #[allow(unsafe_code)]
     fn lock_until(&self, deadline: Option<Instant>) -> Result<StateLock, BridgeError> {
-        create_private_directory(&self.root)?;
-        validate_private_directory(&self.root)?;
-        let path = self.root.join(LOCK_FILE);
-        let mut options = fs::OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .mode(FILE_MODE)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let file = match options.create_new(true).open(&path) {
-            Ok(file) => {
-                file.set_permissions(Permissions::from_mode(FILE_MODE))
-                    .map_err(|_| BridgeError::StateFailed)?;
-                file
+        let file = if self.existing_only {
+            let directory = open_existing_private_directory(&self.root)?;
+            open_regular_file_at(&directory, LOCK_FILE)?
+        } else {
+            create_private_directory(&self.root)?;
+            validate_private_directory(&self.root)?;
+            let path = self.root.join(LOCK_FILE);
+            let mut options = fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .mode(FILE_MODE)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            match options.create_new(true).open(&path) {
+                Ok(file) => {
+                    file.set_permissions(Permissions::from_mode(FILE_MODE))
+                        .map_err(|_| BridgeError::StateFailed)?;
+                    file
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => options
+                    .create_new(false)
+                    .open(&path)
+                    .map_err(|_| BridgeError::StateFailed)?,
+                Err(_) => return Err(BridgeError::StateFailed),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => options
-                .create_new(false)
-                .open(&path)
-                .map_err(|_| BridgeError::StateFailed)?,
-            Err(_) => return Err(BridgeError::StateFailed),
         };
         validate_regular_metadata(&file.metadata().map_err(|_| BridgeError::StateFailed)?)?;
         loop {
@@ -690,7 +722,8 @@ fn open_regular_file_at(directory: &OwnedFd, name: &str) -> Result<File, BridgeE
         libc::openat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            // Do not wait for a FIFO writer before checking regular-file metadata.
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
     if raw < 0 {
@@ -1215,6 +1248,112 @@ mod tests {
 
     fn prepare(store: &ProvisioningStore) -> Result<PreparedGeneration, BridgeError> {
         store.prepare(Instant::now() + Duration::from_secs(5))
+    }
+
+    #[test]
+    fn existing_only_never_initializes_missing_state() {
+        let root = tempfile::tempdir().expect("root");
+        let store = store(&root).existing_only();
+        assert_eq!(store.identifiers().err(), Some(BridgeError::StateMissing));
+        assert!(!store.root.exists());
+        assert_eq!(prepare(&store).err(), Some(BridgeError::StateMissing));
+        assert!(!store.root.exists());
+    }
+
+    #[test]
+    fn existing_only_requires_active_generation_before_staging() {
+        let root = tempfile::tempdir().expect("root");
+        let normal = store(&root);
+        normal.identifiers().expect("initial identifier");
+        let existing = store(&root).existing_only();
+        assert!(existing.identifiers().is_ok());
+        assert_eq!(prepare(&existing).err(), Some(BridgeError::StateMissing));
+        assert!(!existing.root.join(STAGING_DIRECTORY).exists());
+        assert!(!existing.root.join(GENERATIONS_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn existing_only_reuses_state_and_rechecks_disappearance() {
+        for missing in [IDENTIFIER_FILE, LOCK_FILE, ACTIVE_FILE] {
+            let root = tempfile::tempdir().expect("root");
+            let normal = store(&root);
+            normal.identifiers().expect("identity");
+            prepare(&normal)
+                .expect("initial generation")
+                .publish()
+                .expect("publish");
+            let existing = store(&root).existing_only();
+            drop(prepare(&existing).expect("reuse active generation"));
+            fs::remove_file(existing.root.join(missing)).expect("remove state");
+            assert_eq!(prepare(&existing).err(), Some(BridgeError::StateMissing));
+            assert_eq!(
+                existing
+                    .prepare_for_reprovision(Instant::now() + Duration::from_secs(5))
+                    .err(),
+                Some(BridgeError::StateMissing)
+            );
+            assert!(!existing.root.join(missing).exists());
+            assert_eq!(
+                fs::read_dir(existing.root.join(STAGING_DIRECTORY))
+                    .expect("staging")
+                    .count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn existing_only_does_not_rebind_incompatible_generation() {
+        let root = tempfile::tempdir().expect("root");
+        let old = bound_store(&root, "old");
+        old.identifiers().expect("identity");
+        prepare(&old)
+            .expect("initial generation")
+            .publish()
+            .expect("publish");
+        let existing = bound_store(&root, "new").existing_only();
+        assert_eq!(
+            prepare(&existing).err(),
+            Some(BridgeError::StateIncompatible)
+        );
+        assert_eq!(
+            existing
+                .prepare_for_reprovision(Instant::now() + Duration::from_secs(5))
+                .err(),
+            Some(BridgeError::StateIncompatible)
+        );
+        assert_eq!(
+            fs::read_dir(existing.root.join(STAGING_DIRECTORY))
+                .expect("staging")
+                .count(),
+            0
+        );
+        drop(prepare(&old).expect("original binding unchanged"));
+    }
+
+    #[test]
+    fn existing_only_rejects_fifo_lock_without_blocking() {
+        let root = tempfile::tempdir().expect("root");
+        let normal = store(&root);
+        normal.identifiers().expect("identity");
+        let lock_path = normal.root.join(LOCK_FILE);
+        fs::remove_file(&lock_path).expect("remove lock");
+        let path = CString::new(lock_path.as_os_str().as_bytes()).expect("path");
+        // SAFETY: `path` is a live NUL-terminated path in this private test directory.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), FILE_MODE) }, 0);
+        let existing = store(&root).existing_only();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = prepare(&existing).err();
+            let _ = send.send(result);
+        });
+        assert_eq!(
+            receive
+                .recv_timeout(Duration::from_secs(1))
+                .expect("special file open must not block"),
+            Some(BridgeError::InvalidPath)
+        );
+        worker.join().expect("worker");
     }
 
     #[test]

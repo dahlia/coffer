@@ -183,9 +183,57 @@ impl CofferAnisetteProvider {
         context: AnisetteContext,
     ) -> Result<Self, CofferAnisetteError> {
         let store = ProvisioningStore::from_installation(paths, installation)?;
+        Self::open_store(
+            installation,
+            store,
+            helper_executable,
+            helper_timeout,
+            context,
+        )
+    }
+
+    /// Opens only an existing local identity for a stored-session operation.
+    ///
+    /// Missing identity, lock, or active provisioning is never initialized.
+    /// Generation rechecks the active state while locked before starting native
+    /// work. Successful OTP generation still stages and publishes local state;
+    /// this is not a filesystem read-only provider. No network request or
+    /// provisioning occurs automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CofferAnisetteError::NotProvisioned`] for a missing identity,
+    /// or a path/identifier error for invalid local state. Missing or
+    /// incompatible active provisioning is rejected on generation.
+    pub fn open_existing(
+        installation: &InstalledLibraries,
+        paths: &BootstrapPaths,
+        helper_executable: PathBuf,
+        helper_timeout: Duration,
+        context: AnisetteContext,
+    ) -> Result<Self, CofferAnisetteError> {
+        let store = ProvisioningStore::from_installation(paths, installation)?.existing_only();
+        Self::open_store(
+            installation,
+            store,
+            helper_executable,
+            helper_timeout,
+            context,
+        )
+    }
+
+    fn open_store(
+        installation: &InstalledLibraries,
+        store: ProvisioningStore,
+        helper_executable: PathBuf,
+        helper_timeout: Duration,
+        context: AnisetteContext,
+    ) -> Result<Self, CofferAnisetteError> {
         let identifiers = store.identifiers().map_err(|error| {
             if error == BridgeError::StateCorrupt {
                 CofferAnisetteError::InvalidIdentifier
+            } else if error == BridgeError::StateMissing {
+                CofferAnisetteError::NotProvisioned
             } else {
                 error.into()
             }
