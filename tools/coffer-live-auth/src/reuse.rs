@@ -440,6 +440,21 @@ mod tests {
             (200, 1, Ok(())),
             (401, 1, Err(ReuseError::Token(TokenError::Rejected))),
             (
+                403,
+                1,
+                Err(ReuseError::Token(TokenError::Http { status: 403 })),
+            ),
+            (
+                429,
+                1,
+                Err(ReuseError::Token(TokenError::Http { status: 429 })),
+            ),
+            (
+                503,
+                1,
+                Err(ReuseError::Token(TokenError::Http { status: 503 })),
+            ),
+            (
                 200,
                 2_000_000_000_000,
                 Err(ReuseError::Token(TokenError::Expired)),
@@ -463,11 +478,21 @@ mod tests {
                 ),
                 expected
             );
+            if let Err(error @ ReuseError::Token(TokenError::Http { status })) = expected {
+                assert_eq!(
+                    error.to_string(),
+                    format!("service-token request returned HTTP {status}")
+                );
+                assert_eq!(
+                    format!("{error:?}"),
+                    format!("Token(Http {{ status: {status} }})")
+                );
+            }
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(terminal.prompts, 1);
             assert!(!terminal.output.contains("SYNTHETIC"));
         }
-        assert_eq!(reader.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 6);
         assert_eq!(std::fs::read(slot_path).unwrap(), initial);
         let operations = reader.backend.operations();
         assert_eq!(
@@ -489,7 +514,7 @@ mod tests {
                 .iter()
                 .filter(|(op, _)| *op == FakeOperation::Load)
                 .count(),
-            3
+            6
         );
         assert_eq!(
             block_on(reader.backend.load(&slot))

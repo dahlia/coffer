@@ -184,8 +184,14 @@ pub enum TokenError {
     Anisette,
     /// A transport failed; the outcome may be unknown and must not be retried.
     Transport,
-    /// An HTTP response had a status other than 200.
-    Http,
+    /// An HTTP response had a status other than 200 or 401.
+    ///
+    /// Retains only the numeric status, never headers or response material.
+    /// This does not establish session expiry or permit a retry.
+    Http {
+        /// Numeric HTTP status returned by the transport.
+        status: u16,
+    },
     /// The server rejected the session/request or requested additional authentication.
     /// No undocumented status code is interpreted as session expiry.
     Rejected,
@@ -208,7 +214,9 @@ impl fmt::Display for TokenError {
             Self::InvalidSession => "stored session input is invalid",
             Self::Anisette => "local anisette failed",
             Self::Transport => "token transport failed; outcome may be unknown",
-            Self::Http => "token HTTP request was rejected",
+            Self::Http { status } => {
+                return write!(f, "service-token request returned HTTP {status}");
+            }
             Self::Rejected => "service-token request was rejected",
             Self::Malformed => "malformed service-token response",
             Self::TooLarge => "service-token response exceeds a bound",
@@ -278,7 +286,9 @@ impl<'a, T: Transport, A: AnisetteProvider> TokenClient<'a, T, A> {
             return Err(TokenError::Rejected);
         }
         if response.status() != 200 {
-            return Err(TokenError::Http);
+            return Err(TokenError::Http {
+                status: response.status(),
+            });
         }
         let token = wire::response(response.body(), &session, service)?;
         let now = clock()?;

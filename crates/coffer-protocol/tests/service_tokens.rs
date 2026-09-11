@@ -311,6 +311,18 @@ fn inner_fields_types_duplicates_expiry_and_service_are_validated() {
 }
 
 #[test]
+fn http_status_diagnostics_exclude_response_material() {
+    for status in [400, 403, 429, 500, 503] {
+        let error = outcome(support::reply(status, b"SYNTHETIC-SECRET-BODY"), &key()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("service-token request returned HTTP {status}")
+        );
+        assert_eq!(format!("{error:?}"), format!("Http {{ status: {status} }}"));
+    }
+}
+
+#[test]
 fn rejection_http_transport_and_custom_adapter_errors_never_retry_or_leak() {
     use coffer_protocol::{
         anisette::{AnisetteData, AnisetteError, AnisetteProvider},
@@ -333,7 +345,7 @@ fn rejection_http_transport_and_custom_adapter_errors_never_retry_or_leak() {
     for status in [201, 204, 301, 302, 403, 407, 429, 500, 503] {
         assert_eq!(
             outcome(support::reply(status, b"SYNTHETIC-BODY"), &key()).unwrap_err(),
-            TokenError::Http
+            TokenError::Http { status }
         );
     }
     for error in [

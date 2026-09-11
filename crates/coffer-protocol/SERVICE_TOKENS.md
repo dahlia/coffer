@@ -60,7 +60,10 @@ HTTP 200 is insufficient: `Response.Status.ec` must be integer zero and an
 handling. No undocumented server error number means “session expired.” Other
 HTTP, transport, malformed, oversized, unsupported, authentication-tag, clock,
 and locally expired-token outcomes remain distinct fixed classifications.
-Remote text and adapter error strings never become diagnostic output.
+General HTTP failures preserve only the numeric status in `TokenError::Http`;
+the harness reports it without headers or response content. This identifies the
+HTTP outcome, not its underlying cause or permission to retry. Remote text and
+adapter error strings never become diagnostic output.
 
 The encrypted `et` data contains three bytes `XYZ` as AAD, a 16-byte IV,
 ciphertext, then a 16-byte tag. RustCrypto `AesGcm<Aes256, U16>` authenticates
