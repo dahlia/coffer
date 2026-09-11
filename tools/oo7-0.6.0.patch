@@ -1,0 +1,33 @@
+diff --git a/src/crypto/openssl.rs b/src/crypto/openssl.rs
+--- a/src/crypto/openssl.rs
++++ b/src/crypto/openssl.rs
+@@ -112,3 +112,4 @@
+-    let mut common_secret_bytes = dh
+-        .set_private_key(private_key_bn)?
+-        .compute_key(&server_public_key_bn)?;
++    let common_secret_bytes = Zeroizing::new(
++        dh.set_private_key(private_key_bn)?
++            .compute_key(&server_public_key_bn)?,
++    );
+@@ -116,7 +117,6 @@
+-    let mut common_secret_padded = vec![0; 128 - common_secret_bytes.len()];
+-    // inefficient, but ok for now
+-    common_secret_padded.append(&mut common_secret_bytes);
+-
+-    // hkdf
+-    // input_keying_material
+-    let ikm = common_secret_padded;
++    // Preallocate the final size so growth cannot release an earlier
++    // allocation containing shared-secret bytes.  Both buffers are wiped on
++    // success and on every later error return.
++    let mut ikm = Zeroizing::new(Vec::with_capacity(128));
++    ikm.resize(128 - common_secret_bytes.len(), 0);
++    ikm.extend_from_slice(&common_secret_bytes);
+diff --git a/src/file/api/mod.rs b/src/file/api/mod.rs
+--- a/src/file/api/mod.rs
++++ b/src/file/api/mod.rs
+@@ -65,0 +66,4 @@
++#[allow(
++    deprecated,
++    reason = "oo7 0.6.0's file format still uses zvariant 5 GVariant compatibility"
++)]

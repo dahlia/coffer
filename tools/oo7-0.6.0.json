@@ -1,0 +1,254 @@
+{
+  "schema": 1,
+  "vendor_path": "crates/coffer-service/vendor/oo7-0.6.0",
+  "package": {
+    "name": "oo7",
+    "version": "0.6.0",
+    "source": "crates.io",
+    "archive_sha256": "78f2bfed90f1618b4b48dcad9307f25e14ae894e2949642c87c351601d62cebd",
+    "repository": "https://github.com/linux-credentials/oo7",
+    "commit": "9070389f33bec2e47048384e2fdbd7aab64e0df7",
+    "license": "MIT",
+    "license_path": "LICENSE"
+  },
+  "patch": {
+    "path": "tools/oo7-0.6.0.patch",
+    "sha256": "14ba289bb7e5801118537a9fe9e976cfd75be219c1b7ba8d33e8a75d45d26b6a",
+    "modifications": [
+      {
+        "path": "src/crypto/openssl.rs",
+        "reason": "Zeroize the DH shared secret and final-capacity padded HKDF input on success and early-return paths.",
+        "upstream_sha256": "3f54eb6e449474d657a92626b0656e54dbb331669d8e777a304626f41678f691",
+        "vendored_sha256": "61c33eb67b1a94f7bd7eb07b79eb58cc49772bfb415472865128fad0f8024872"
+      },
+      {
+        "path": "src/file/api/mod.rs",
+        "reason": "Keep the unselected file backend warning-free with a scoped allowance for its zvariant 5 GVariant compatibility call.",
+        "upstream_sha256": "fb29c9c4b40fc4d7ce95b4cb074d0626c0e607f56e2008e9f06a69175db367ba",
+        "vendored_sha256": "d83f937492380476d21904a9404847790d8de1ff6e9222001b1327c434d9dcae"
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": ".cargo-ok",
+      "sha256": "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91"
+    },
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "d696826c2dc4281d0c33fd032ecb523c0ba5e448523ad05e5e28d05d0e712473"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "77bff1680502aecb3797b063fecdbca74043020632095a1c0f442a731e9cd7b0"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f05c5661a9f247cacf5441272c2394599754b664470a91eed23841ccf06b48bb"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "aa0eb37e5fd6908097987f198369e679872f794a9fe36ae68e80012d47ec0182"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "fb1def6675e300ebd48f65bbc6f57d874edee332abdb110d01a3a1924b20dc9c"
+    },
+    {
+      "path": "README.md",
+      "sha256": "70ba1e2d7d95a067daccace4f885283533dc7bba56eaf0f8cfcd83203264fc58"
+    },
+    {
+      "path": "README.upstream",
+      "sha256": "9eecd3bf4182230cab4bec855c6dd3b50847fcc6f4f8c2516ef5e7d5512dff78"
+    },
+    {
+      "path": "examples/basic.rs",
+      "sha256": "a4210b9b5f8f9dfb6b1de36a7e09ad26c85f9d48762aa60ee3f30705cf3785ec"
+    },
+    {
+      "path": "examples/basic_2.rs",
+      "sha256": "25dadf0a6fab8b3b52efecbf213a9d06a6d5fa775b609dedb7d9179ee2fe8abf"
+    },
+    {
+      "path": "examples/dbus_service.rs",
+      "sha256": "7029e6886f9d5aa18f72680dc46ca89d80af26cb9f6c48d14ca524fc12125cfc"
+    },
+    {
+      "path": "examples/file_tracing.rs",
+      "sha256": "a429d51b6b0d4b5112c6f27d67d023ee64ba3b41ed2e2e5bc8eb9b898c58b38f"
+    },
+    {
+      "path": "examples/schema.rs",
+      "sha256": "23b0bfe0525f086f178bf1384eec5c52b3cc2d71dc3d2fc08b13a087bc3d9f66"
+    },
+    {
+      "path": "fixtures/default.keyring",
+      "sha256": "09faa4178acfd570b88f00d834a0b78bcee4796368a2af9a3432013231179017"
+    },
+    {
+      "path": "fixtures/legacy.keyring",
+      "sha256": "53589a1f016222a7e7fa66c185c1be70538170b399a1a3b9897b4004384f65ee"
+    },
+    {
+      "path": "src/crypto/error.rs",
+      "sha256": "97949205c6a61a1120829b937227d73f4e449ea87e71636049b38b5712631b2a"
+    },
+    {
+      "path": "src/crypto/mod.rs",
+      "sha256": "882838830245f6d28eb4ac7d31d867c90219e40b42c3186ae3380ecc4d3e925c"
+    },
+    {
+      "path": "src/crypto/native.rs",
+      "sha256": "bd401b3ca96750edcda10310af4f15e44016ab7252d494c94bf934ef00022506"
+    },
+    {
+      "path": "src/crypto/openssl.rs",
+      "sha256": "61c33eb67b1a94f7bd7eb07b79eb58cc49772bfb415472865128fad0f8024872"
+    },
+    {
+      "path": "src/dbus/algorithm.rs",
+      "sha256": "d8eaba340c82a36a4ea9b74d784d5c8712844f5a1665ec58fc2ef3f476581d8d"
+    },
+    {
+      "path": "src/dbus/api/collection.rs",
+      "sha256": "f121b14e34fe6604e8639c87830e48456b9f656dbfb838aa88f10da837f4543d"
+    },
+    {
+      "path": "src/dbus/api/item.rs",
+      "sha256": "e3e99937ed68d98693ec30fc23cbd440d753e08e785bbe5fd9c163929d415904"
+    },
+    {
+      "path": "src/dbus/api/mod.rs",
+      "sha256": "7df5f14d0ce0c1fc496558a627584979dde9f50b820b65e081e26f7868967b11"
+    },
+    {
+      "path": "src/dbus/api/prompt.rs",
+      "sha256": "9ebdbecf113f659ce4ed546d266a672198ae85224a100f8f2bdd3a3a35e6bfce"
+    },
+    {
+      "path": "src/dbus/api/properties.rs",
+      "sha256": "67d4e60f0d2368b0cf019eac3010f34a130a696924e7adfe25f3c2ebf1531c6c"
+    },
+    {
+      "path": "src/dbus/api/secret.rs",
+      "sha256": "7642934afc18f8bbd6bde173d46aa1b780906109b3e55244eb7e4a3c32a05c25"
+    },
+    {
+      "path": "src/dbus/api/service.rs",
+      "sha256": "1198e3f6e48454618ddfa0ce37437ab36b07fc8e71fd9c22e7a15e88d7c2b233"
+    },
+    {
+      "path": "src/dbus/api/session.rs",
+      "sha256": "e5bfc4c526af3bf49cdeb577d0716d533bc59c213fbd566dfe64a5caac71c786"
+    },
+    {
+      "path": "src/dbus/collection.rs",
+      "sha256": "0986d563d965ef16706ae3e7abe15a0d5b5e31cd5b760fbec0713e90930d23d4"
+    },
+    {
+      "path": "src/dbus/error.rs",
+      "sha256": "71b1b37e0b5ad4404412bf7bf644e5c608f6ca93e68cfca0b063a57c07934c9d"
+    },
+    {
+      "path": "src/dbus/item.rs",
+      "sha256": "bc79b63a53adfbecd65988edb8cebe42cb2709a44ecc4bb1f9d92a27fd1d062d"
+    },
+    {
+      "path": "src/dbus/mod.rs",
+      "sha256": "1da0bba57ae146329cdc4e61f99af157b34762a041be698b1f862b16ff91abbf"
+    },
+    {
+      "path": "src/dbus/service.rs",
+      "sha256": "7dda578e039966c0e51bb474cbea6930b8bf78ad8fa7c2de08ae42679e03457b"
+    },
+    {
+      "path": "src/error.rs",
+      "sha256": "de693ba86d01eac4b86161c127bd00f8770e0149691ccedc0fd4da088f0f9ab4"
+    },
+    {
+      "path": "src/file/api/encrypted_item.rs",
+      "sha256": "a5ea600d4fc2d9042f8091f84616c1612cc680cea1d2796807f896585be501dd"
+    },
+    {
+      "path": "src/file/api/legacy_keyring.rs",
+      "sha256": "c3dd59b313ab140c44badbafc453771143a7be6caf65c1f24b7d139d78e51824"
+    },
+    {
+      "path": "src/file/api/mod.rs",
+      "sha256": "d83f937492380476d21904a9404847790d8de1ff6e9222001b1327c434d9dcae"
+    },
+    {
+      "path": "src/file/error.rs",
+      "sha256": "448187feb8096cae35c8baa21aa0b71e83ac176ef1b7ba2165baf8e6e91a4ce0"
+    },
+    {
+      "path": "src/file/locked_item.rs",
+      "sha256": "16a9f6d51a6cbb669446c4b114e8bbe0f3d39c21b308963df19a85d44d3bf1b4"
+    },
+    {
+      "path": "src/file/locked_keyring.rs",
+      "sha256": "a6c36914f1a1c7e3d62e37c40c47dba9f186d6c15a4b25d4348e7d6d516d6ca2"
+    },
+    {
+      "path": "src/file/mod.rs",
+      "sha256": "e68c7ac36da0c7486023aec1e016d26de2a631218833df26cdb18bc7f54f9976"
+    },
+    {
+      "path": "src/file/unlocked_item.rs",
+      "sha256": "5ff03e1fcb5fc1399eec8ed26c7a69c12ca0d3d859229e4d4cd8f6e93bf7c642"
+    },
+    {
+      "path": "src/file/unlocked_keyring.rs",
+      "sha256": "0f34a75c1b13e717ffa07a39ccf5ca6f4a47d4b06db50296d84750a9f0336327"
+    },
+    {
+      "path": "src/key.rs",
+      "sha256": "c39ba1c99f3b2620a013cf19f607f15544c73ef7140d6f8f4620eefeeb01d83b"
+    },
+    {
+      "path": "src/keyring.rs",
+      "sha256": "8ab40df2b02488752221b14e20d1c677b78cd35f3986d4dc1f7568046f2f8f48"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "5bce68060c7d4f58c6406d0a83c9ea739094bb13faf002ca6e84de53d2114682"
+    },
+    {
+      "path": "src/mac.rs",
+      "sha256": "d6a3b41a23581011c052a58b4f531c3f962f0f89fd457c6e6da84921128442d4"
+    },
+    {
+      "path": "src/migration.rs",
+      "sha256": "4b11dacafe0afab9885ae6828be503149354e2dbb7c7324effce3ff03bed0406"
+    },
+    {
+      "path": "src/secret.rs",
+      "sha256": "f10db8014363848385c9c4ea8f95bbad8fbe22d538e34051426b9229af2c423f"
+    },
+    {
+      "path": "tests/dbus_collection.rs",
+      "sha256": "2f3f4bbc043461b754e639f32ec86412c2a6fd725acdb5a4a1a4055eae6060a6"
+    },
+    {
+      "path": "tests/dbus_item.rs",
+      "sha256": "962af4b95d41262b5a90ec6eb5b85e14f47c5e7efe96d894ac503ceb5bcb99e7"
+    },
+    {
+      "path": "tests/dbus_service.rs",
+      "sha256": "406102de38dd5387babac346cdf92ebcfb5572cf1bf794f2608fc7118a3f17db"
+    },
+    {
+      "path": "tests/file_unlocked_keyring.rs",
+      "sha256": "9cdda3e36635862c9e3e16efaba95d990f6af0d910673402a36a6739833c0459"
+    },
+    {
+      "path": "tests/keyring.rs",
+      "sha256": "55012c20744089b1f55b67189bab37c821c4e384afed1af75af203623dd59995"
+    },
+    {
+      "path": "tests/schema.rs",
+      "sha256": "bce8f5f17ae58a0b532d01d8fd9570b6e207c8067bd928b36b9c983754882cb6"
+    }
+  ]
+}

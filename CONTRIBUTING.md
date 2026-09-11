@@ -435,6 +435,16 @@ its patch, or its provenance record changes, run
 upstream commit and is intentionally excluded from `mise run check` and
 `mise run ci`; their provenance check remains offline.
 
+The `oo7` 0.6.0 crate is vendored from its crates.io archive under its upstream
+MIT license. Coffer carries only the shared-secret zeroization patch and the
+scoped GVariant deprecation allowance documented in the vendor README. The
+reviewed archive identity, patch, and SHA-256 digest of every vendored file are
+recorded in *tools/oo7-0.6.0.json*. `mise run check-oo7` verifies that record
+without network access and rejects changed, missing, additional, symlink, or
+special files. It is part of both `mise run check` and `mise run ci`. Any change
+to the vendored tree, patch, or provenance record requires a fresh upstream and
+license review before updating those hashes.
+
 [`apple-private-apis`]: https://github.com/SideStore/apple-private-apis
 
 ### Reference-only implementations

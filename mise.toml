@@ -49,6 +49,11 @@ description = "Verify the local-only anisette graph and vendored provenance"
 wait_for = ["clippy"]
 run = "cargo run --quiet --locked --offline -p coffer-omnisette-check"
 
+[tasks.check-oo7]
+description = "Verify the complete vendored oo7 tree and patch provenance"
+wait_for = ["clippy"]
+run = "cargo run --quiet --locked --offline -p coffer-oo7-check"
+
 [tasks.verify-omnisette-upstream]
 description = "Reproduce the vendored omnisette subtree from pinned upstream"
 # This explicit maintainer check fetches the immutable upstream commit. It is
@@ -58,7 +63,13 @@ run = "bash tools/import-omnisette-local.sh"
 
 [tasks.check]
 description = "Fast static verification for frequent use and pre-commit hooks"
-depends = ["fmt-check", "clippy", "lint-actions", "check-omnisette"]
+depends = [
+  "fmt-check",
+  "clippy",
+  "lint-actions",
+  "check-omnisette",
+  "check-oo7",
+]
 
 # Build, test, and documentation ----------------------------------------------
 

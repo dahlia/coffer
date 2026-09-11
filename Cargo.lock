@@ -387,6 +387,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coffer-oo7-check"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "coffer-protocol"
 version = "0.1.0"
 dependencies = [

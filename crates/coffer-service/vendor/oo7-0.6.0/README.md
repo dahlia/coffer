@@ -12,6 +12,12 @@ The upstream MIT license is preserved in *LICENSE*, the normalized and original
 Cargo manifests are preserved, and the upstream README is preserved byte for
 byte as *README.upstream*.
 
+The reviewed archive identity, exhaustive file inventory, and final SHA-256
+digests are recorded in *../../../../tools/oo7-0.6.0.json*. The two changes from
+the archive are reproducible from *../../../../tools/oo7-0.6.0.patch*, whose
+digest and the original and final digests of both affected files are recorded
+in the manifest. `mise run check-oo7` validates this complete record offline.
+
 Coffer carries one narrow patch in *src/crypto/openssl.rs*.  The DH shared
 secret and padded HKDF input use `Zeroizing<Vec<u8>>`, and the padded input is
 allocated at its final capacity before secret bytes are appended.  This keeps
