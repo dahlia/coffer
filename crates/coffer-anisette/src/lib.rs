@@ -60,8 +60,8 @@ pub use client::{HelperClient, ProvisioningSession, SmokeResult, VerifiedLibrary
 pub use error::{BridgeError, Stage};
 pub use provider::{AnisetteContext, CofferAnisetteError, CofferAnisetteProvider};
 pub use provision::{
-    ExplicitProvisioningRequest, ProvisioningCoordinator, ProvisioningError, ProvisioningErrorKind,
-    ProvisioningReceipt, ProvisioningStage,
+    ExplicitProvisioningRequest, MalformedResponseReason, ProvisioningCoordinator,
+    ProvisioningError, ProvisioningErrorKind, ProvisioningReceipt, ProvisioningStage,
 };
 pub use state::{DeviceIdentifiers, ProvisioningStore};
 pub use types::{

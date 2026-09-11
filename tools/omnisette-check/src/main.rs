@@ -521,6 +521,7 @@ fn apple_endpoint_urls_are_allowlisted(path: &Path, line: &str) -> bool {
         "https://gsa.apple.com/grandslam/GsService2/lookup",
         "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning",
         "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning",
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
     ];
     let urls = urls_in_line(line);
     !urls.is_empty() && urls.iter().all(|url| allowed.contains(url))
@@ -538,12 +539,15 @@ fn urls_in_line(mut line: &str) -> Vec<&str> {
     }) {
         let candidate = &line[start..];
         let end = candidate
-            .find(|character: char| {
-                character.is_whitespace()
+            .char_indices()
+            .find_map(|(index, character)| {
+                (character.is_whitespace()
                     || matches!(
                         character,
                         '\"' | '\'' | '<' | '>' | ')' | ']' | '}' | ';' | ','
                     )
+                    || (character == '\\' && candidate.as_bytes().get(index + 1) == Some(&b'\"')))
+                .then_some(index)
             })
             .unwrap_or(candidate.len());
         urls.push(&candidate[..end]);
@@ -882,6 +886,7 @@ mod tests {
             "https://gsa.apple.com/grandslam/GsService2/lookup",
             "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning",
             "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning",
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
         ] {
             let source = format!("const URL: &str = \"{allowed}\";");
             assert!(verify_source_text(provisioning_path, &source).is_ok());
@@ -894,6 +899,10 @@ mod tests {
             "https://gsa.apple.com/grandslam/GsService2/lookup?next=evil",
             "https://gsa.apple.com/grandslam/GsService2/midStartProvisioning",
             "https://gsa.apple.com/grandslam/GsService2/midFinishProvisioning",
+            "https://www.apple.com/DTDs/PropertyList-1.0.dtd",
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd?next=evil",
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd/extra",
+            r#"http://www.apple.com/DTDs/PropertyList-1.0.dtd\u{3f}next=evil"#,
         ] {
             let source = format!("const URL: &str = \"{injected}\";");
             assert_eq!(

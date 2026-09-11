@@ -38,20 +38,26 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_XML_FIELDS: usize = 512;
 const MAX_XML_NODES: usize = MAX_XML_FIELDS + 1;
 const MAX_XML_DEPTH: usize = 8;
-const CONTENT_TYPE: &str = "text/x-xml-plist";
+const REQUEST_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+const RESPONSE_CONTENT_TYPE: &str = "text/x-xml-plist";
 const LOOKUP_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
 const START_ENDPOINT: &str = "https://gsa.apple.com/grandslam/MidService/startMachineProvisioning";
 const FINISH_ENDPOINT: &str =
     "https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning";
-const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
-const SERIAL_NUMBER_PLACEHOLDER: &str = "0";
+// These compatibility labels and media types are byte-exact offline AuthKit wire
+// observations, not a description assembled from the current host. They were
+// corroborated against apple-private-apis 03beb1aa42991ccdad6214dee77e72282bef461f
+// and MIT Anisette.py a61cddfb2275187822ad0c3999af747b8c9a4f9a.
+const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0";
+const CLIENT_APP_NAME: &str = "Setup";
 const CLIENT_INFO: &str =
     "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>";
+const PLIST_DOCTYPE: &str = "plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"";
+const PLIST_PREAMBLE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
 
 pub(crate) struct ProvisioningContext {
     local_user_id: Zeroizing<String>,
     device_id: Zeroizing<String>,
-    serial_number: &'static str,
     time_zone: String,
     locale: String,
     clock: Arc<dyn Clock>,
@@ -62,7 +68,6 @@ impl ProvisioningContext {
         Self {
             local_user_id: Zeroizing::new(identifiers.local_user_id().expose().to_owned()),
             device_id: Zeroizing::new(identifiers.device_identifier().to_owned()),
-            serial_number: SERIAL_NUMBER_PLACEHOLDER,
             time_zone: context.time_zone.clone(),
             locale: context.locale.clone(),
             clock: Arc::clone(&context.clock),
@@ -78,7 +83,6 @@ impl ProvisioningContext {
         Ok(ProvisioningHeaders {
             local_user_id: Zeroizing::new(self.local_user_id.to_string()),
             device_id: Zeroizing::new(self.device_id.to_string()),
-            serial_number: self.serial_number,
             client_info: CLIENT_INFO,
             client_time: Zeroizing::new(client_time),
             time_zone: &self.time_zone,
@@ -96,7 +100,6 @@ impl fmt::Debug for ProvisioningContext {
 struct ProvisioningHeaders<'a> {
     local_user_id: Zeroizing<String>,
     device_id: Zeroizing<String>,
-    serial_number: &'static str,
     client_info: &'static str,
     client_time: Zeroizing<String>,
     time_zone: &'a str,
@@ -109,10 +112,10 @@ impl ProvisioningHeaders<'_> {
             ("X-Apple-I-MD-LU", &self.local_user_id),
             ("X-Mme-Device-Id", &self.device_id),
             ("X-Mme-Client-Info", self.client_info),
-            ("X-Apple-I-SRL-NO", self.serial_number),
             ("X-Apple-I-Client-Time", &self.client_time),
             ("X-Apple-I-TimeZone", self.time_zone),
             ("X-Apple-Locale", self.locale),
+            ("X-Apple-Client-App-Name", CLIENT_APP_NAME),
         ]
     }
 }
@@ -179,8 +182,8 @@ pub enum ProvisioningErrorKind {
     HttpStatus(u16),
     /// The response content type was not the fixed property-list type.
     ContentType,
-    /// The body was malformed, oversized, duplicated, or unexpected.
-    MalformedResponse,
+    /// The body failed one fixed, secret-free structural classification.
+    MalformedResponse(MalformedResponseReason),
     /// HTTP succeeded but the protocol status reported failure.
     ProtocolStatus(i64),
     /// The sandboxed native helper failed.
@@ -191,6 +194,84 @@ pub enum ProvisioningErrorKind {
     WorkerUnavailable,
     /// The public provisioning header context was invalid or unavailable.
     InvalidContext,
+}
+
+/// A fixed, secret-free reason why a provisioning response was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MalformedResponseReason {
+    /// The lookup returned an endpoint outside its exact HTTPS allowlist.
+    Endpoint,
+    /// The response body was empty or exceeded the two MiB bound.
+    BodySize,
+    /// The XML stream was malformed or incomplete.
+    XmlSyntax,
+    /// An XML declaration appeared after parsing had started or was duplicated.
+    XmlDeclaration,
+    /// A doctype was duplicated or was not the canonical Apple plist doctype.
+    XmlDoctype,
+    /// The document used unsupported XML or plist markup.
+    XmlMarkup,
+    /// A plist element carried an unsupported attribute.
+    XmlAttribute,
+    /// The XML nesting depth exceeded the fixed bound.
+    XmlDepth,
+    /// The number of dictionary fields exceeded the fixed bound.
+    XmlFieldLimit,
+    /// The number of completed plist nodes exceeded the fixed bound.
+    XmlNodeLimit,
+    /// A dictionary key was empty, duplicated, or missing its value.
+    DictionaryKey,
+    /// A consumed value was not a dictionary.
+    DictionaryType,
+    /// A required non-secret field was absent.
+    MissingField,
+    /// A consumed non-secret field had the wrong plist type.
+    FieldType,
+    /// Neither the response nor root dictionary contained a status.
+    MissingStatus,
+    /// The selected status or its `ec` field had the wrong shape.
+    StatusType,
+    /// A successful response omitted a required secret field.
+    MissingSecret,
+    /// A required secret was not a plist string or data value.
+    SecretType,
+    /// A required secret was not valid standard Base64 or decoded empty.
+    SecretEncoding,
+    /// A required secret exceeded its encoded or decoded size bound.
+    SecretSize,
+}
+
+impl fmt::Display for MalformedResponseReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Endpoint => "endpoint outside the fixed allowlist",
+            Self::BodySize => "response body size",
+            Self::XmlSyntax => "XML syntax",
+            Self::XmlDeclaration => "XML declaration",
+            Self::XmlDoctype => "plist doctype",
+            Self::XmlMarkup => "XML or plist markup",
+            Self::XmlAttribute => "plist element attributes",
+            Self::XmlDepth => "XML depth bound",
+            Self::XmlFieldLimit => "plist field bound",
+            Self::XmlNodeLimit => "plist node bound",
+            Self::DictionaryKey => "plist dictionary key",
+            Self::DictionaryType => "dictionary field type",
+            Self::MissingField => "missing required field",
+            Self::FieldType => "required field type",
+            Self::MissingStatus => "missing protocol status",
+            Self::StatusType => "protocol status type",
+            Self::MissingSecret => "missing required secret",
+            Self::SecretType => "required secret type",
+            Self::SecretEncoding => "required secret encoding",
+            Self::SecretSize => "required secret size",
+        };
+        formatter.write_str(label)
+    }
+}
+
+fn malformed(reason: MalformedResponseReason) -> ProvisioningErrorKind {
+    ProvisioningErrorKind::MalformedResponse(reason)
 }
 
 /// One failed attempt, retaining the first failure separately from cleanup.
@@ -388,17 +469,22 @@ fn run_once(
     let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
         ProvisioningError::at(ProvisioningStage::Lookup, ProvisioningErrorKind::Transport)
     })?;
-    let headers = context
+    let lookup_headers = context
         .headers()
         .map_err(|kind| ProvisioningError::at(ProvisioningStage::Lookup, kind))?;
     check_ready(cancelled, deadline, ProvisioningStage::Lookup)?;
     let lookup = transport
-        .lookup(&headers, deadline)
+        .lookup(&lookup_headers, deadline)
         .map_err(|kind| ProvisioningError::at(ProvisioningStage::Lookup, kind))?;
+    drop(lookup_headers);
     check_ready(cancelled, deadline, ProvisioningStage::StartRequest)?;
-    let StartResponse(spim) = transport
-        .start(lookup.start_endpoint, &headers, deadline)
+    let start_headers = context
+        .headers()
         .map_err(|kind| ProvisioningError::at(ProvisioningStage::StartRequest, kind))?;
+    let StartResponse(spim) = transport
+        .start(lookup.start_endpoint, &start_headers, deadline)
+        .map_err(|kind| ProvisioningError::at(ProvisioningStage::StartRequest, kind))?;
+    drop(start_headers);
     check_ready(cancelled, deadline, ProvisioningStage::NativeStart)?;
     let session = native.start(spim, deadline).map_err(|error| {
         ProvisioningError::at(
@@ -416,8 +502,21 @@ fn run_once(
     if let Err(error) = check_ready(cancelled, deadline, ProvisioningStage::FinishRequest) {
         return Err(error.with_cleanup(session.cancel()));
     }
-    let finish = match transport.finish(lookup.finish_endpoint, session.cpim(), &headers, deadline)
-    {
+    let finish_headers = match context.headers() {
+        Ok(headers) => headers,
+        Err(kind) => {
+            return Err(
+                ProvisioningError::at(ProvisioningStage::FinishRequest, kind)
+                    .with_cleanup(session.cancel()),
+            );
+        }
+    };
+    let finish = match transport.finish(
+        lookup.finish_endpoint,
+        session.cpim(),
+        &finish_headers,
+        deadline,
+    ) {
         Ok(finish) => finish,
         Err(kind) => {
             return Err(
@@ -426,6 +525,7 @@ fn run_once(
             );
         }
     };
+    drop(finish_headers);
     if let Err(error) = check_ready(cancelled, deadline, ProvisioningStage::NativeEnd) {
         return Err(error.with_cleanup(session.cancel()));
     }
@@ -518,7 +618,7 @@ impl Endpoint {
         if value == expected.value() {
             Ok(expected)
         } else {
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(malformed(MalformedResponseReason::Endpoint))
         }
     }
 }
@@ -583,7 +683,7 @@ fn parse_lookup_response(body: &[u8]) -> Result<Lookup, ProvisioningErrorKind> {
             document
         }
         (None, None) => document,
-        (Some(_), None) => return Err(ProvisioningErrorKind::MalformedResponse),
+        (Some(_), None) => return Err(malformed(MalformedResponseReason::MissingStatus)),
     };
     let urls = values
         .get("urls")?
@@ -602,56 +702,61 @@ fn parse_lookup_response(body: &[u8]) -> Result<Lookup, ProvisioningErrorKind> {
 
 fn parse_start_response(body: &[u8]) -> Result<StartResponse, ProvisioningErrorKind> {
     let root = parse_document(body)?;
-    let envelope = root.dict_containing(&["Response"])?;
-    envelope.only_known(&["Header", "Response", "Status"])?;
-    validate_optional_empty_header(&envelope)?;
-    let response = envelope.get("Response")?.dict_containing(&["spim"])?;
-    response.only_known(&["spim", "Status", "X-Apple-I-MD-RINFO"])?;
-    validate_optional_routing(&response)?;
-    validate_envelope_status(&envelope, &response)?;
-    Ok(StartResponse(secret_data(response.get("spim")?)?))
+    let envelope = root.dict()?;
+    validate_response_status_first(&envelope)?;
+    validate_optional_header(&envelope)?;
+    let response = required_response(&envelope)?;
+    Ok(StartResponse(required_secret(&response, "spim")?))
 }
 
 fn parse_finish_response(body: &[u8]) -> Result<FinishResponse, ProvisioningErrorKind> {
     let root = parse_document(body)?;
-    let envelope = root.dict_containing(&["Response"])?;
-    envelope.only_known(&["Header", "Response", "Status"])?;
-    validate_optional_empty_header(&envelope)?;
-    let response = envelope.get("Response")?.dict_containing(&["ptm", "tk"])?;
-    response.only_known(&["ptm", "tk", "Status", "X-Apple-I-MD-RINFO"])?;
-    validate_optional_routing(&response)?;
-    validate_envelope_status(&envelope, &response)?;
+    let envelope = root.dict()?;
+    validate_response_status_first(&envelope)?;
+    validate_optional_header(&envelope)?;
+    let response = required_response(&envelope)?;
     Ok(FinishResponse {
-        ptm: secret_data(response.get("ptm")?)?,
-        tk: secret_data(response.get("tk")?)?,
+        ptm: required_secret(&response, "ptm")?,
+        tk: required_secret(&response, "tk")?,
     })
 }
 
-fn validate_optional_empty_header(envelope: &DictRef<'_>) -> Result<(), ProvisioningErrorKind> {
+fn validate_optional_header(envelope: &DictRef<'_>) -> Result<(), ProvisioningErrorKind> {
     if let Some(header) = envelope.optional("Header") {
-        header.dict_containing(&[])?.only_known(&[])?;
+        header
+            .dict()
+            .map_err(|_| malformed(MalformedResponseReason::FieldType))?;
     }
     Ok(())
 }
 
-fn validate_envelope_status(
-    envelope: &DictRef<'_>,
+fn validate_response_status_first(envelope: &DictRef<'_>) -> Result<(), ProvisioningErrorKind> {
+    let response_status = match envelope.optional("Response") {
+        Some(Node::Dict(values)) => DictRef(values).optional("Status"),
+        _ => None,
+    };
+    response_status
+        .or_else(|| envelope.optional("Status"))
+        .ok_or_else(|| malformed(MalformedResponseReason::MissingStatus))
+        .and_then(validate_status)
+}
+
+fn required_response<'a>(envelope: &DictRef<'a>) -> Result<DictRef<'a>, ProvisioningErrorKind> {
+    envelope
+        .optional("Response")
+        .ok_or_else(|| malformed(MalformedResponseReason::MissingField))?
+        .dict()
+        .map_err(|_| malformed(MalformedResponseReason::FieldType))
+}
+
+fn required_secret(
     response: &DictRef<'_>,
-) -> Result<(), ProvisioningErrorKind> {
-    match (response.optional("Status"), envelope.optional("Status")) {
-        (Some(status), None) | (None, Some(status)) => validate_status(status),
-        _ => Err(ProvisioningErrorKind::MalformedResponse),
-    }
-}
-
-fn validate_optional_routing(response: &DictRef<'_>) -> Result<(), ProvisioningErrorKind> {
-    if let Some(value) = response.optional("X-Apple-I-MD-RINFO") {
-        let Node::String(value) = value else {
-            return Err(ProvisioningErrorKind::MalformedResponse);
-        };
-        validate_header_value(value).map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
-    }
-    Ok(())
+    name: &str,
+) -> Result<SecretBytes, ProvisioningErrorKind> {
+    let node = response
+        .optional(name)
+        .ok_or_else(|| malformed(MalformedResponseReason::MissingSecret))?;
+    secret_data(node)
 }
 
 enum Method {
@@ -660,10 +765,10 @@ enum Method {
 }
 
 fn add_protocol_headers<B>(
-    mut request: ureq::RequestBuilder<B>,
+    request: ureq::RequestBuilder<B>,
     headers: &ProvisioningHeaders<'_>,
 ) -> ureq::RequestBuilder<B> {
-    request = request.header("content-type", CONTENT_TYPE);
+    let mut request = request;
     for (name, value) in headers.entries() {
         request = request.header(name, value);
     }
@@ -683,7 +788,9 @@ fn request(
     let agent = provisioning_agent(remaining);
     let response = match method {
         Method::Get => add_protocol_headers(agent.get(url), headers).call(),
-        Method::Post => add_protocol_headers(agent.post(url), headers).send(body.unwrap_or(&[])),
+        Method::Post => add_protocol_headers(agent.post(url), headers)
+            .header("content-type", REQUEST_CONTENT_TYPE)
+            .send(body.unwrap_or(&[])),
     }
     .map_err(classify_transport)?;
     if response.status().as_u16() != 200 {
@@ -705,7 +812,7 @@ fn request(
         .read_to_end(&mut bytes)
         .map_err(|_| ProvisioningErrorKind::Transport)?;
     if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::BodySize));
     }
     Ok(bytes)
 }
@@ -757,10 +864,11 @@ fn classify_transport(error: ureq::Error) -> ProvisioningErrorKind {
 
 fn valid_content_type(value: &str) -> bool {
     let mut parts = value.split(';');
-    if !parts
-        .next()
-        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(CONTENT_TYPE))
-    {
+    if !parts.next().is_some_and(|media_type| {
+        media_type
+            .trim()
+            .eq_ignore_ascii_case(RESPONSE_CONTENT_TYPE)
+    }) {
         return false;
     }
     let parameters: Vec<_> = parts.collect();
@@ -769,12 +877,17 @@ fn valid_content_type(value: &str) -> bool {
 }
 
 fn start_request() -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict/></dict></plist>".to_vec())
+    Zeroizing::new(
+        format!(
+            "{PLIST_PREAMBLE}<plist version=\"1.0\">\n<dict>\n\t<key>Header</key>\n\t<dict/>\n\t<key>Request</key>\n\t<dict/>\n</dict>\n</plist>\n"
+        )
+        .into_bytes(),
+    )
 }
 
 fn finish_request(cpim: &[u8]) -> Zeroizing<Vec<u8>> {
-    const PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict><key>cpim</key><string>";
-    const SUFFIX: &[u8] = b"</string></dict></dict></plist>";
+    const PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Header</key>\n\t<dict/>\n\t<key>Request</key>\n\t<dict>\n\t\t<key>cpim</key>\n\t\t<string>";
+    const SUFFIX: &[u8] = b"</string>\n\t</dict>\n</dict>\n</plist>\n";
     let mut encoded = Zeroizing::new(STANDARD.encode(cpim));
     let capacity = PREFIX.len() + encoded.len() + SUFFIX.len();
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
@@ -794,23 +907,28 @@ enum Node {
 }
 
 impl Node {
-    fn dict_containing(&self, keys: &[&str]) -> Result<DictRef<'_>, ProvisioningErrorKind> {
+    fn dict(&self) -> Result<DictRef<'_>, ProvisioningErrorKind> {
         let Self::Dict(values) = self else {
-            return Err(ProvisioningErrorKind::MalformedResponse);
+            return Err(malformed(MalformedResponseReason::DictionaryType));
         };
+        Ok(DictRef(values))
+    }
+
+    fn dict_containing(&self, keys: &[&str]) -> Result<DictRef<'_>, ProvisioningErrorKind> {
+        let values = self.dict()?;
         if !keys
             .iter()
-            .all(|key| values.iter().any(|(name, _)| name == key))
+            .all(|key| values.0.iter().any(|(name, _)| name == key))
         {
-            return Err(ProvisioningErrorKind::MalformedResponse);
+            return Err(malformed(MalformedResponseReason::MissingField));
         }
-        Ok(DictRef(values))
+        Ok(values)
     }
 
     fn string(&self) -> Result<&str, ProvisioningErrorKind> {
         match self {
             Self::String(value) => Ok(value),
-            _ => Err(ProvisioningErrorKind::MalformedResponse),
+            _ => Err(malformed(MalformedResponseReason::FieldType)),
         }
     }
 }
@@ -818,14 +936,6 @@ impl Node {
 struct DictRef<'a>(&'a [(String, Node)]);
 
 impl<'a> DictRef<'a> {
-    fn only_known(&self, keys: &[&str]) -> Result<(), ProvisioningErrorKind> {
-        if self.0.iter().all(|(name, _)| keys.contains(&name.as_str())) {
-            Ok(())
-        } else {
-            Err(ProvisioningErrorKind::MalformedResponse)
-        }
-    }
-
     fn optional(&self, key: &str) -> Option<&'a Node> {
         self.0
             .iter()
@@ -834,31 +944,28 @@ impl<'a> DictRef<'a> {
 
     fn get(&self, key: &str) -> Result<&'a Node, ProvisioningErrorKind> {
         self.optional(key)
-            .ok_or(ProvisioningErrorKind::MalformedResponse)
+            .ok_or_else(|| malformed(MalformedResponseReason::MissingField))
     }
 }
 
 fn validate_status(node: &Node) -> Result<(), ProvisioningErrorKind> {
-    let status = node.dict_containing(&["ec"])?;
-    status.only_known(&["ec", "em", "au", "hsc", "ed", "ptxid", "rsh"])?;
-    for name in ["em", "au"] {
-        if let Some(value) = status.optional(name)
-            && !matches!(value, Node::String(_))
-        {
-            return Err(ProvisioningErrorKind::MalformedResponse);
-        }
-    }
-    match status.get("ec")? {
+    let status = node
+        .dict()
+        .map_err(|_| malformed(MalformedResponseReason::StatusType))?;
+    match status
+        .optional("ec")
+        .ok_or_else(|| malformed(MalformedResponseReason::StatusType))?
+    {
         Node::Integer(0) => Ok(()),
         Node::Integer(code) => Err(ProvisioningErrorKind::ProtocolStatus(*code)),
-        _ => Err(ProvisioningErrorKind::MalformedResponse),
+        _ => Err(malformed(MalformedResponseReason::StatusType)),
     }
 }
 
 fn secret_data(node: &Node) -> Result<SecretBytes, ProvisioningErrorKind> {
     let value = match node {
         Node::String(value) | Node::Data(value) => value,
-        _ => return Err(ProvisioningErrorKind::MalformedResponse),
+        _ => return Err(malformed(MalformedResponseReason::SecretType)),
     };
     let encoded = Zeroizing::new(
         value
@@ -867,24 +974,24 @@ fn secret_data(node: &Node) -> Result<SecretBytes, ProvisioningErrorKind> {
             .collect::<Vec<_>>(),
     );
     if encoded.len() > 4 * 1024 * 1024 / 3 + 8 {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::SecretSize));
     }
     let maximum_length = encoded.len() / 4 * 3 + 3;
     let mut decoded = Zeroizing::new(vec![0; maximum_length]);
     let decoded_length = STANDARD
         .decode_slice(encoded.as_slice(), &mut decoded)
-        .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+        .map_err(|_| malformed(MalformedResponseReason::SecretEncoding))?;
     decoded.truncate(decoded_length);
     if decoded.is_empty() {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::SecretEncoding));
     }
     SecretBytes::new(std::mem::take(&mut *decoded))
-        .map_err(|_| ProvisioningErrorKind::MalformedResponse)
+        .map_err(|_| malformed(MalformedResponseReason::SecretSize))
 }
 
 fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
     if bytes.is_empty() || bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::BodySize));
     }
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
@@ -901,18 +1008,20 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
             Ok(Event::Decl(_)) if !started && !saw_declaration => {
                 saw_declaration = true;
             }
-            Ok(Event::Decl(_)) => return Err(ProvisioningErrorKind::MalformedResponse),
-            Ok(Event::DocType(_)) if !started && !saw_doctype => {
+            Ok(Event::Decl(_)) => return Err(malformed(MalformedResponseReason::XmlDeclaration)),
+            Ok(Event::DocType(doctype))
+                if !started && !saw_doctype && doctype.as_ref() == PLIST_DOCTYPE.as_bytes() =>
+            {
                 saw_doctype = true;
             }
-            Ok(Event::DocType(_)) => return Err(ProvisioningErrorKind::MalformedResponse),
+            Ok(Event::DocType(_)) => return Err(malformed(MalformedResponseReason::XmlDoctype)),
             Ok(Event::Start(tag)) => {
                 started = true;
                 let name = tag.name();
                 match name.as_ref() {
                     b"plist" => {
                         if !stack.is_empty() || root.is_some() {
-                            return Err(ProvisioningErrorKind::MalformedResponse);
+                            return Err(malformed(MalformedResponseReason::XmlMarkup));
                         }
                         validate_attributes(&tag, true)?;
                         stack.push(Container::Plist);
@@ -970,10 +1079,10 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             Zeroizing::new(String::new()),
                         ));
                     }
-                    _ => return Err(ProvisioningErrorKind::MalformedResponse),
+                    _ => return Err(malformed(MalformedResponseReason::XmlMarkup)),
                 }
                 if stack.len() > MAX_XML_DEPTH {
-                    return Err(ProvisioningErrorKind::MalformedResponse);
+                    return Err(malformed(MalformedResponseReason::XmlDepth));
                 }
             }
             Ok(Event::Empty(tag)) => {
@@ -984,36 +1093,36 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                     b"string" => Node::String(Zeroizing::new(String::new())),
                     b"data" => Node::Data(Zeroizing::new(String::new())),
                     b"array" | b"true" | b"false" => Node::IgnoredStandardValue,
-                    _ => return Err(ProvisioningErrorKind::MalformedResponse),
+                    _ => return Err(malformed(MalformedResponseReason::XmlMarkup)),
                 };
                 push_node(&mut stack, &mut root, &mut nodes, node)?
             }
             Ok(Event::Text(text)) => {
                 let decoded = text
                     .decode()
-                    .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+                    .map_err(|_| malformed(MalformedResponseReason::XmlSyntax))?;
                 if let Some(Container::Text(_, value)) = stack.last_mut() {
                     value.push_str(&decoded);
                     if value.len() > MAX_RESPONSE_BYTES {
-                        return Err(ProvisioningErrorKind::MalformedResponse);
+                        return Err(malformed(MalformedResponseReason::BodySize));
                     }
                 } else if !decoded.bytes().all(is_xml_whitespace) {
-                    return Err(ProvisioningErrorKind::MalformedResponse);
+                    return Err(malformed(MalformedResponseReason::XmlMarkup));
                 }
             }
             Ok(Event::GeneralRef(reference)) => {
                 let Container::Text(_, value) = stack
                     .last_mut()
-                    .ok_or(ProvisioningErrorKind::MalformedResponse)?
+                    .ok_or_else(|| malformed(MalformedResponseReason::XmlMarkup))?
                 else {
-                    return Err(ProvisioningErrorKind::MalformedResponse);
+                    return Err(malformed(MalformedResponseReason::XmlMarkup));
                 };
                 append_reference(&reference, value)?;
             }
             Ok(Event::End(tag)) => {
                 let container = stack
                     .pop()
-                    .ok_or(ProvisioningErrorKind::MalformedResponse)?;
+                    .ok_or_else(|| malformed(MalformedResponseReason::XmlSyntax))?;
                 match (tag.name().as_ref(), container) {
                     (b"plist", Container::Plist) => {}
                     (b"dict", Container::Dict { values, key: None }) => {
@@ -1029,18 +1138,18 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                     }
                     (b"key", Container::Text(TextKind::Key, key)) => {
                         let Some(Container::Dict { values, key: slot }) = stack.last_mut() else {
-                            return Err(ProvisioningErrorKind::MalformedResponse);
+                            return Err(malformed(MalformedResponseReason::DictionaryKey));
                         };
                         if key.is_empty()
                             || values.iter().any(|(existing, _)| existing == key.as_str())
                             || slot.is_some()
                         {
-                            return Err(ProvisioningErrorKind::MalformedResponse);
+                            return Err(malformed(MalformedResponseReason::DictionaryKey));
                         }
                         *slot = Some(key.to_string());
                         fields += 1;
                         if fields > MAX_XML_FIELDS {
-                            return Err(ProvisioningErrorKind::MalformedResponse);
+                            return Err(malformed(MalformedResponseReason::XmlFieldLimit));
                         }
                     }
                     (b"string", Container::Text(TextKind::String, value)) => {
@@ -1054,7 +1163,7 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             .as_str()
                             .trim()
                             .parse()
-                            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+                            .map_err(|_| malformed(MalformedResponseReason::FieldType))?;
                         push_node(&mut stack, &mut root, &mut nodes, Node::Integer(value))?;
                     }
                     (b"real", Container::Text(TextKind::Real, value)) => {
@@ -1062,7 +1171,7 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             .as_str()
                             .trim()
                             .parse::<f64>()
-                            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+                            .map_err(|_| malformed(MalformedResponseReason::FieldType))?;
                         push_node(
                             &mut stack,
                             &mut root,
@@ -1080,21 +1189,21 @@ fn parse_document(bytes: &[u8]) -> Result<Node, ProvisioningErrorKind> {
                             Node::IgnoredStandardValue,
                         )?;
                     }
-                    _ => return Err(ProvisioningErrorKind::MalformedResponse),
+                    _ => return Err(malformed(MalformedResponseReason::XmlSyntax)),
                 }
             }
             Ok(Event::Eof) => break,
             Ok(Event::Comment(_) | Event::CData(_) | Event::PI(_)) => {
-                return Err(ProvisioningErrorKind::MalformedResponse);
+                return Err(malformed(MalformedResponseReason::XmlMarkup));
             }
-            Err(_) => return Err(ProvisioningErrorKind::MalformedResponse),
+            Err(_) => return Err(malformed(MalformedResponseReason::XmlSyntax)),
         }
         buffer.zeroize();
     }
     if !stack.is_empty() {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::XmlSyntax));
     }
-    root.ok_or(ProvisioningErrorKind::MalformedResponse)
+    root.ok_or_else(|| malformed(MalformedResponseReason::XmlSyntax))
 }
 
 enum TextKind {
@@ -1122,19 +1231,19 @@ fn append_reference(
 ) -> Result<(), ProvisioningErrorKind> {
     let decoded = reference
         .decode()
-        .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+        .map_err(|_| malformed(MalformedResponseReason::XmlSyntax))?;
     if let Some(entity) = resolve_xml_entity(&decoded) {
         value.push_str(entity);
     } else {
         let character = reference
             .resolve_char_ref()
-            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?
+            .map_err(|_| malformed(MalformedResponseReason::XmlSyntax))?
             .filter(|character| is_valid_xml_character(*character))
-            .ok_or(ProvisioningErrorKind::MalformedResponse)?;
+            .ok_or_else(|| malformed(MalformedResponseReason::XmlSyntax))?;
         value.push(character);
     }
     if value.len() > MAX_RESPONSE_BYTES {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::BodySize));
     }
     Ok(())
 }
@@ -1156,14 +1265,14 @@ fn validate_attributes(tag: &BytesStart<'_>, plist: bool) -> Result<(), Provisio
     if plist {
         let attribute = attributes
             .next()
-            .ok_or(ProvisioningErrorKind::MalformedResponse)?
-            .map_err(|_| ProvisioningErrorKind::MalformedResponse)?;
+            .ok_or_else(|| malformed(MalformedResponseReason::XmlAttribute))?
+            .map_err(|_| malformed(MalformedResponseReason::XmlAttribute))?;
         if attribute.key.as_ref() != b"version" || attribute.value.as_ref() != b"1.0" {
-            return Err(ProvisioningErrorKind::MalformedResponse);
+            return Err(malformed(MalformedResponseReason::XmlAttribute));
         }
     }
     if attributes.next().is_some() {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::XmlAttribute));
     }
     Ok(())
 }
@@ -1176,12 +1285,14 @@ fn push_node(
 ) -> Result<(), ProvisioningErrorKind> {
     *nodes = nodes
         .checked_add(1)
-        .ok_or(ProvisioningErrorKind::MalformedResponse)?;
+        .ok_or_else(|| malformed(MalformedResponseReason::XmlNodeLimit))?;
     if *nodes > MAX_XML_NODES {
-        return Err(ProvisioningErrorKind::MalformedResponse);
+        return Err(malformed(MalformedResponseReason::XmlNodeLimit));
     }
     if let Some(Container::Dict { values, key }) = stack.last_mut() {
-        let key = key.take().ok_or(ProvisioningErrorKind::MalformedResponse)?;
+        let key = key
+            .take()
+            .ok_or_else(|| malformed(MalformedResponseReason::DictionaryKey))?;
         values.push((key, node));
         Ok(())
     } else if matches!(stack.last(), Some(Container::Array)) {
@@ -1190,7 +1301,7 @@ fn push_node(
         *root = Some(node);
         Ok(())
     } else {
-        Err(ProvisioningErrorKind::MalformedResponse)
+        Err(malformed(MalformedResponseReason::XmlMarkup))
     }
 }
 
@@ -1271,7 +1382,7 @@ mod tests {
         let duplicate = b"<plist version=\"1.0\"><dict><key>Status</key><integer>0</integer><key>Status</key><integer>0</integer></dict></plist>";
         assert!(matches!(
             parse_document(duplicate),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         let bounded_extra = b"<plist version=\"1.0\"><dict><key>Response</key><dict/><key>Status</key><dict><key>ec</key><integer>0</integer></dict><key>extra</key><string>x</string></dict></plist>";
         assert!(
@@ -1282,21 +1393,21 @@ mod tests {
         );
         assert!(matches!(
             parse_document(b"<plist version=\"1.0\" extra=\"x\"><dict/></plist>"),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             parse_document(
                 b"<plist version=\"1.0\"><plist version=\"1.0\"><dict/></plist></plist>"
             ),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             parse_document(b"<plist version=\"1.0\"><dict extra=\"x\"/></plist>"),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             parse_document(&vec![b'x'; MAX_RESPONSE_BYTES + 1]),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
 
         let directory = b"<plist version=\"1.0\"><dict><key>urls</key><dict><key>unrelated</key><string>unused</string><key>midStartProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/startMachineProvisioning</string><key>midFinishProvisioning</key><string>https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning</string></dict><key>extra</key><string>bounded</string></dict></plist>";
@@ -1312,7 +1423,7 @@ mod tests {
             ));
         }
         let document = format!(
-            "<?xml version=\"1.0\"?><!DOCTYPE plist><plist version=\"1.0\"><dict><key>empty-string</key><string/><key>empty-data</key><data/><key>enabled</key><true/><key>disabled</key><false/><key>ratio</key><real>1.25</real><key>timestamp</key><date>2026-09-11T00:00:00Z</date><key>items</key><array><string>one</string><integer>2</integer><true/><dict/><array/></array>{extras}<key>urls</key><dict><key>midStartProvisioning</key><string>{CAPTURED_START_ENDPOINT}</string><key>midFinishProvisioning</key><string>{CAPTURED_FINISH_ENDPOINT}</string></dict><key>Status</key><dict><key>hsc</key><integer>200</integer><key>ed</key><string>success</string><key>ec</key><integer>0</integer><key>em</key><string></string><key>ptxid</key><string>synthetic-transaction</string><key>rsh</key><string>synthetic-routing</string></dict></dict></plist>"
+            "<?xml version=\"1.0\"?><!DOCTYPE {PLIST_DOCTYPE}><plist version=\"1.0\"><dict><key>empty-string</key><string/><key>empty-data</key><data/><key>enabled</key><true/><key>disabled</key><false/><key>ratio</key><real>1.25</real><key>timestamp</key><date>2026-09-11T00:00:00Z</date><key>items</key><array><string>one</string><integer>2</integer><true/><dict/><array/></array>{extras}<key>urls</key><dict><key>midStartProvisioning</key><string>{CAPTURED_START_ENDPOINT}</string><key>midFinishProvisioning</key><string>{CAPTURED_FINISH_ENDPOINT}</string></dict><key>Status</key><dict><key>hsc</key><integer>200</integer><key>ed</key><string>success</string><key>ec</key><integer>0</integer><key>em</key><string></string><key>ptxid</key><string>synthetic-transaction</string><key>rsh</key><string>synthetic-routing</string></dict></dict></plist>"
         );
         let lookup = parse_lookup_response(document.as_bytes()).expect("realistic lookup bag");
         assert_eq!(lookup.start_endpoint.value(), CAPTURED_START_ENDPOINT);
@@ -1352,7 +1463,7 @@ mod tests {
                     &invalid_start,
                     CAPTURED_FINISH_ENDPOINT
                 )),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
         for invalid_finish in [
@@ -1383,7 +1494,7 @@ mod tests {
                     CAPTURED_START_ENDPOINT,
                     &invalid_finish
                 )),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
     }
@@ -1404,14 +1515,14 @@ mod tests {
             );
             assert!(matches!(
                 parse_lookup_response(document.as_bytes()),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
 
         let wrong_spim = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><array/></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
         assert!(matches!(
             parse_start_response(wrong_spim),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
     }
 
@@ -1442,7 +1553,7 @@ mod tests {
         ] {
             assert!(matches!(
                 parse_document(invalid),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
         let external_entity = format!(
@@ -1451,8 +1562,21 @@ mod tests {
         );
         assert!(matches!(
             parse_document(external_entity.as_bytes()),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
+        for invalid in [
+            "<!DOCTYPE plist>",
+            "<!DOCTYPE plist SYSTEM \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\" [<!ENTITY x \"x\">]>",
+        ] {
+            let document = format!("{invalid}<plist version=\"1.0\"><dict/></plist>");
+            assert!(matches!(
+                parse_document(document.as_bytes()),
+                Err(ProvisioningErrorKind::MalformedResponse(
+                    MalformedResponseReason::XmlDoctype
+                ))
+            ));
+        }
     }
 
     #[test]
@@ -1467,7 +1591,7 @@ mod tests {
         ] {
             assert!(matches!(
                 parse_document(invalid),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
     }
@@ -1488,7 +1612,7 @@ mod tests {
         );
         assert!(matches!(
             parse_document(over_field_limit.as_bytes()),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
 
         let mut at_node_limit = String::from("<plist version=\"1.0\"><array>");
@@ -1500,7 +1624,7 @@ mod tests {
         let over_node_limit = at_node_limit.replacen("</array>", "<string/></array>", 1);
         assert!(matches!(
             parse_document(over_node_limit.as_bytes()),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
 
         let too_deep = format!(
@@ -1510,11 +1634,11 @@ mod tests {
         );
         assert!(matches!(
             parse_document(too_deep.as_bytes()),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             parse_document(&vec![b'x'; MAX_RESPONSE_BYTES + 1]),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
     }
 
@@ -1528,10 +1652,10 @@ mod tests {
                 ("X-Apple-I-MD-LU", "local-user"),
                 ("X-Mme-Device-Id", "device-id"),
                 ("X-Mme-Client-Info", CLIENT_INFO),
-                ("X-Apple-I-SRL-NO", "0"),
                 ("X-Apple-I-Client-Time", "2026-09-04T00:00:00Z"),
                 ("X-Apple-I-TimeZone", "UTC"),
                 ("X-Apple-Locale", "en_US"),
+                ("X-Apple-Client-App-Name", "Setup"),
             ]
             .as_slice()
         );
@@ -1539,18 +1663,14 @@ mod tests {
             provisioning_agent(Duration::from_secs(30))
                 .config()
                 .user_agent(),
-            ureq::config::AutoHeaderValue::Provided(value) if value.as_str() == "akd/1.0 CFNetwork/808.1.4"
+            ureq::config::AutoHeaderValue::Provided(value)
+                if value.as_str() == "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0"
         ));
         let agent = provisioning_agent(Duration::from_secs(30));
         let lookup_request = add_protocol_headers(agent.get(LOOKUP_ENDPOINT), &headers);
         let request_headers = lookup_request.headers_ref().expect("lookup headers");
-        assert_eq!(
-            request_headers
-                .get("content-type")
-                .expect("content type")
-                .as_bytes(),
-            CONTENT_TYPE.as_bytes()
-        );
+        assert!(request_headers.get("content-type").is_none());
+        assert!(request_headers.get("X-Apple-I-SRL-NO").is_none());
         for (name, value) in headers.entries() {
             assert_eq!(
                 request_headers
@@ -1560,6 +1680,17 @@ mod tests {
                 value.as_bytes()
             );
         }
+        let post_request = add_protocol_headers(agent.post(START_ENDPOINT), &headers)
+            .header("content-type", REQUEST_CONTENT_TYPE);
+        assert_eq!(
+            post_request
+                .headers_ref()
+                .expect("post headers")
+                .get("content-type")
+                .expect("post content type")
+                .as_bytes(),
+            REQUEST_CONTENT_TYPE.as_bytes()
+        );
         assert_eq!(format!("{context:?}"), "ProvisioningContext(<redacted>)");
     }
 
@@ -1578,17 +1709,17 @@ mod tests {
     fn secret_data_and_protocol_status_fail_closed() {
         assert!(matches!(
             secret_data(&Node::Data(Zeroizing::new(String::new()))),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             secret_data(&Node::Data(Zeroizing::new("c2VjcmV0!".to_owned()))),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         assert!(matches!(
             secret_data(&Node::Data(Zeroizing::new(
                 "A".repeat(4 * 1024 * 1024 / 3 + 9)
             ))),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
         for invalid in [
             String::new(),
@@ -1597,7 +1728,7 @@ mod tests {
         ] {
             assert!(matches!(
                 secret_data(&Node::String(Zeroizing::new(invalid))),
-                Err(ProvisioningErrorKind::MalformedResponse)
+                Err(ProvisioningErrorKind::MalformedResponse(_))
             ));
         }
         let failure = Node::Dict(vec![("ec".to_owned(), Node::Integer(7))]);
@@ -1611,15 +1742,18 @@ mod tests {
         assert_eq!(finish.ptm.expose(), b"ptm");
         assert_eq!(finish.tk.expose(), b"tk");
 
-        let wrapped = b"<?xml version=\"1.0\"?><!DOCTYPE plist><plist version=\"1.0\"><dict><key>Response</key><dict><key>ptm</key><data>\n cH\tRt \n</data><key>tk</key><data>\n dGs= \n</data><key>X-Apple-I-MD-RINFO</key><string>17106176</string><key>Status</key><dict><key>ec</key><integer>0</integer><key>em</key><string></string></dict></dict></dict></plist>";
-        let finish = parse_finish_response(wrapped).expect("nested status and wrapped data");
+        let wrapped = format!(
+            "<?xml version=\"1.0\"?><!DOCTYPE {PLIST_DOCTYPE}><plist version=\"1.0\"><dict><key>Response</key><dict><key>ptm</key><data>\n cH\tRt \n</data><key>tk</key><data>\n dGs= \n</data><key>X-Apple-I-MD-RINFO</key><string>17106176</string><key>Status</key><dict><key>ec</key><integer>0</integer><key>em</key><string></string></dict></dict></dict></plist>"
+        );
+        let finish =
+            parse_finish_response(wrapped.as_bytes()).expect("nested status and wrapped data");
         assert_eq!(finish.ptm.expose(), b"ptm");
         assert_eq!(finish.tk.expose(), b"tk");
         assert!(matches!(
             parse_document(
                 b"<!DOCTYPE plist><!DOCTYPE plist><plist version=\"1.0\"><dict/></plist>"
             ),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(_))
         ));
 
         let start = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>Status</key><dict><key>ec</key><integer>0</integer><key>em</key><string></string></dict></dict></dict></plist>";
@@ -1628,52 +1762,25 @@ mod tests {
         let missing = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></dict></plist>";
         assert!(matches!(
             parse_start_response(missing),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            Err(ProvisioningErrorKind::MalformedResponse(
+                MalformedResponseReason::MissingSecret
+            ))
         ));
-        let ambiguous = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        let missing_response = b"<plist version=\"1.0\"><dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
         assert!(matches!(
-            parse_start_response(ambiguous),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            parse_start_response(missing_response),
+            Err(ProvisioningErrorKind::MalformedResponse(
+                MalformedResponseReason::MissingField
+            ))
         ));
+        let ambiguous = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict><key>Status</key><dict><key>ec</key><integer>7</integer></dict></dict></plist>";
+        parse_start_response(ambiguous).expect("response status takes precedence");
         let unknown_response = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>ptm</key><data>cHRt</data><key>tk</key><data>dGs=</data><key>unknown</key><string>x</string><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></dict></plist>";
-        assert!(matches!(
-            parse_finish_response(unknown_response),
-            Err(ProvisioningErrorKind::MalformedResponse)
-        ));
+        parse_finish_response(unknown_response).expect("unknown response field ignored");
         let unknown_status = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>Status</key><dict><key>ec</key><integer>0</integer><key>unknown</key><string>x</string></dict></dict></dict></plist>";
-        assert!(matches!(
-            parse_start_response(unknown_status),
-            Err(ProvisioningErrorKind::MalformedResponse)
-        ));
+        parse_start_response(unknown_status).expect("unknown status metadata ignored");
         let invalid_routing = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>ptm</key><data>cHRt</data><key>tk</key><data>dGs=</data><key>X-Apple-I-MD-RINFO</key><integer>17106176</integer><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></dict></plist>";
-        assert!(matches!(
-            parse_finish_response(invalid_routing),
-            Err(ProvisioningErrorKind::MalformedResponse)
-        ));
-
-        let valid_routing = Node::Dict(vec![(
-            "X-Apple-I-MD-RINFO".to_owned(),
-            Node::String(Zeroizing::new("17106176".to_owned())),
-        )]);
-        assert_eq!(
-            validate_optional_routing(&valid_routing.dict_containing(&[]).expect("dictionary")),
-            Ok(())
-        );
-        for invalid in [
-            String::new(),
-            "line\nbreak".to_owned(),
-            "비ASCII".to_owned(),
-            "x".repeat(coffer_protocol::anisette::MAX_ANISETTE_VALUE_LEN + 1),
-        ] {
-            let routing = Node::Dict(vec![(
-                "X-Apple-I-MD-RINFO".to_owned(),
-                Node::String(Zeroizing::new(invalid)),
-            )]);
-            assert_eq!(
-                validate_optional_routing(&routing.dict_containing(&[]).expect("dictionary")),
-                Err(ProvisioningErrorKind::MalformedResponse)
-            );
-        }
+        parse_finish_response(invalid_routing).expect("unconsumed routing shape ignored");
     }
 
     #[test]
@@ -1709,21 +1816,76 @@ mod tests {
         assert_eq!(finish.tk.expose(), b"tk");
 
         let nonempty_header = b"<plist version=\"1.0\"><dict><key>Header</key><dict><key>extra</key><string>x</string></dict><key>Response</key><dict><key>spim</key><string>c3BpbQ==</string></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
-        assert!(matches!(
-            parse_start_response(nonempty_header),
-            Err(ProvisioningErrorKind::MalformedResponse)
-        ));
+        parse_start_response(nonempty_header).expect("nonempty header dictionary");
         let wrong_em_type = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><string>c3BpbQ==</string></dict><key>Status</key><dict><key>ec</key><integer>0</integer><key>em</key><integer>0</integer></dict></dict></plist>";
+        parse_start_response(wrong_em_type).expect("unconsumed status metadata ignored");
+    }
+
+    #[test]
+    fn start_error_status_precedes_missing_secret() {
+        let response = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>Status</key><dict><key>ec</key><integer>-20101</integer></dict></dict></dict></plist>";
         assert!(matches!(
-            parse_start_response(wrong_em_type),
-            Err(ProvisioningErrorKind::MalformedResponse)
+            parse_start_response(response),
+            Err(ProvisioningErrorKind::ProtocolStatus(-20101))
         ));
     }
 
     #[test]
+    fn response_status_precedes_root_status_with_root_fallback() {
+        let root_only_error = b"<plist version=\"1.0\"><dict><key>Status</key><dict><key>ec</key><integer>-20101</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(root_only_error),
+            Err(ProvisioningErrorKind::ProtocolStatus(-20101))
+        ));
+        assert!(matches!(
+            parse_finish_response(root_only_error),
+            Err(ProvisioningErrorKind::ProtocolStatus(-20101))
+        ));
+
+        let nested_error = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>Status</key><dict><key>ec</key><integer>-42</integer></dict></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(nested_error),
+            Err(ProvisioningErrorKind::ProtocolStatus(-42))
+        ));
+    }
+
+    #[test]
+    fn consumed_fields_keep_strict_types() {
+        let wrong_header = b"<plist version=\"1.0\"><dict><key>Header</key><string>ignored</string><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(wrong_header),
+            Err(ProvisioningErrorKind::MalformedResponse(
+                MalformedResponseReason::FieldType
+            ))
+        ));
+        let wrong_status = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data></dict><key>Status</key><dict><key>ec</key><string>0</string></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(wrong_status),
+            Err(ProvisioningErrorKind::MalformedResponse(
+                MalformedResponseReason::StatusType
+            ))
+        ));
+        let wrong_secret = b"<plist version=\"1.0\"><dict><key>Response</key><dict><key>spim</key><integer>1</integer></dict><key>Status</key><dict><key>ec</key><integer>0</integer></dict></dict></plist>";
+        assert!(matches!(
+            parse_start_response(wrong_secret),
+            Err(ProvisioningErrorKind::MalformedResponse(
+                MalformedResponseReason::SecretType
+            ))
+        ));
+    }
+
+    #[test]
+    fn start_accepts_bounded_unconsumed_fields() {
+        let response = b"<plist version=\"1.0\"><dict><key>Header</key><dict><key>format</key><string>plist</string></dict><key>Response</key><dict><key>spim</key><data>c3BpbQ==</data><key>RINFO</key><integer>17106176</integer><key>Status</key><dict><key>ec</key><integer>0</integer><key>future</key><string>bounded</string></dict></dict><key>future</key><string>bounded</string></dict></plist>";
+        let StartResponse(spim) =
+            parse_start_response(response).expect("bounded unconsumed fields");
+        assert_eq!(spim.expose(), b"spim");
+    }
+
+    #[test]
     fn wire_requests_are_byte_exact_and_secret_safe() {
-        assert_eq!(&*start_request(), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict/></dict></plist>");
-        assert_eq!(&*finish_request(b"cpim"), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict/><key>Request</key><dict><key>cpim</key><string>Y3BpbQ==</string></dict></dict></plist>");
+        assert_eq!(&*start_request(), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Header</key>\n\t<dict/>\n\t<key>Request</key>\n\t<dict/>\n</dict>\n</plist>\n");
+        assert_eq!(&*finish_request(b"cpim"), b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Header</key>\n\t<dict/>\n\t<key>Request</key>\n\t<dict>\n\t\t<key>cpim</key>\n\t\t<string>Y3BpbQ==</string>\n\t</dict>\n</dict>\n</plist>\n");
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1741,16 +1903,18 @@ mod tests {
 
     struct FakeTransport {
         calls: Arc<Mutex<Vec<&'static str>>>,
+        client_times: Option<Arc<Mutex<Vec<String>>>>,
         fail: Fail,
         cancel_after_finish: Option<Arc<AtomicBool>>,
     }
     impl ProvisioningTransport for FakeTransport {
         fn lookup(
             &self,
-            _: &ProvisioningHeaders<'_>,
+            headers: &ProvisioningHeaders<'_>,
             _: Instant,
         ) -> Result<Lookup, ProvisioningErrorKind> {
             self.calls.lock().expect("calls").push("lookup");
+            self.record_client_time(headers);
             if self.fail == Fail::Lookup {
                 return Err(ProvisioningErrorKind::Transport);
             }
@@ -1762,10 +1926,11 @@ mod tests {
         fn start(
             &self,
             _: Endpoint,
-            _: &ProvisioningHeaders<'_>,
+            headers: &ProvisioningHeaders<'_>,
             _: Instant,
         ) -> Result<StartResponse, ProvisioningErrorKind> {
             self.calls.lock().expect("calls").push("start-request");
+            self.record_client_time(headers);
             if self.fail == Fail::Start {
                 return Err(ProvisioningErrorKind::Transport);
             }
@@ -1777,10 +1942,11 @@ mod tests {
             &self,
             _: Endpoint,
             _: &[u8],
-            _: &ProvisioningHeaders<'_>,
+            headers: &ProvisioningHeaders<'_>,
             _: Instant,
         ) -> Result<FinishResponse, ProvisioningErrorKind> {
             self.calls.lock().expect("calls").push("finish-request");
+            self.record_client_time(headers);
             if matches!(self.fail, Fail::Finish | Fail::Cancel) {
                 return Err(ProvisioningErrorKind::ProtocolStatus(7));
             }
@@ -1794,6 +1960,17 @@ mod tests {
         }
     }
 
+    impl FakeTransport {
+        fn record_client_time(&self, headers: &ProvisioningHeaders<'_>) {
+            if let Some(client_times) = &self.client_times {
+                client_times
+                    .lock()
+                    .expect("client times")
+                    .push(headers.client_time.to_string());
+            }
+        }
+    }
+
     struct TestClock;
 
     impl Clock for TestClock {
@@ -1802,11 +1979,32 @@ mod tests {
         }
     }
 
+    struct IncrementingClock(std::sync::atomic::AtomicUsize);
+
+    impl Clock for IncrementingClock {
+        fn now(&self) -> Result<String, crate::CofferAnisetteError> {
+            let second = self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(format!("2026-09-11T00:00:{second:02}Z"))
+        }
+    }
+
+    struct ThirdCallFailingClock(std::sync::atomic::AtomicUsize);
+
+    impl Clock for ThirdCallFailingClock {
+        fn now(&self) -> Result<String, crate::CofferAnisetteError> {
+            let call = self.0.fetch_add(1, Ordering::Relaxed);
+            if call == 2 {
+                Err(crate::CofferAnisetteError::InvalidTime)
+            } else {
+                Ok(format!("2026-09-11T00:00:{call:02}Z"))
+            }
+        }
+    }
+
     fn context() -> ProvisioningContext {
         ProvisioningContext {
             local_user_id: Zeroizing::new("local-user".to_owned()),
             device_id: Zeroizing::new("device-id".to_owned()),
-            serial_number: SERIAL_NUMBER_PLACEHOLDER,
             time_zone: "UTC".to_owned(),
             locale: "en_US".to_owned(),
             clock: Arc::new(TestClock),
@@ -1877,6 +2075,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let transport = FakeTransport {
             calls: Arc::clone(&calls),
+            client_times: None,
             fail,
             cancel_after_finish: None,
         };
@@ -1927,6 +2126,85 @@ mod tests {
                     == 1)
             );
         }
+    }
+
+    #[test]
+    fn each_network_stage_gets_a_fresh_client_time() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client_times = Arc::new(Mutex::new(Vec::new()));
+        let transport = FakeTransport {
+            calls: Arc::clone(&calls),
+            client_times: Some(Arc::clone(&client_times)),
+            fail: Fail::None,
+            cancel_after_finish: None,
+        };
+        let native = FakeNative {
+            calls,
+            fail: Fail::None,
+        };
+        let context = ProvisioningContext {
+            local_user_id: Zeroizing::new("local-user".to_owned()),
+            device_id: Zeroizing::new("device-id".to_owned()),
+            time_zone: "UTC".to_owned(),
+            locale: "en_US".to_owned(),
+            clock: Arc::new(IncrementingClock(std::sync::atomic::AtomicUsize::new(0))),
+        };
+
+        run_once(
+            &transport,
+            &native,
+            &context,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+        )
+        .expect("one attempt");
+        assert_eq!(
+            *client_times.lock().expect("client times"),
+            [
+                "2026-09-11T00:00:00Z",
+                "2026-09-11T00:00:01Z",
+                "2026-09-11T00:00:02Z",
+            ]
+        );
+    }
+
+    #[test]
+    fn finish_header_failure_destroys_the_native_session() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let transport = FakeTransport {
+            calls: Arc::clone(&calls),
+            client_times: None,
+            fail: Fail::None,
+            cancel_after_finish: None,
+        };
+        let native = FakeNative {
+            calls: Arc::clone(&calls),
+            fail: Fail::None,
+        };
+        let context = ProvisioningContext {
+            local_user_id: Zeroizing::new("local-user".to_owned()),
+            device_id: Zeroizing::new("device-id".to_owned()),
+            time_zone: "UTC".to_owned(),
+            locale: "en_US".to_owned(),
+            clock: Arc::new(ThirdCallFailingClock(std::sync::atomic::AtomicUsize::new(
+                0,
+            ))),
+        };
+
+        let error = run_once(
+            &transport,
+            &native,
+            &context,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+        )
+        .expect_err("third client-time lookup fails");
+        assert_eq!(error.stage(), ProvisioningStage::FinishRequest);
+        assert_eq!(error.kind(), ProvisioningErrorKind::InvalidContext);
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            ["lookup", "start-request", "native-start", "destroy"]
+        );
     }
 
     #[test]
@@ -2000,6 +2278,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let transport = FakeTransport {
             calls: Arc::clone(&calls),
+            client_times: None,
             fail: Fail::None,
             cancel_after_finish: None,
         };
@@ -2026,6 +2305,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let transport = FakeTransport {
             calls: Arc::clone(&calls),
+            client_times: None,
             fail: Fail::None,
             cancel_after_finish: Some(Arc::clone(&cancelled)),
         };
@@ -2060,5 +2340,36 @@ mod tests {
             ProvisioningErrorKind::ProtocolStatus(200),
             ProvisioningErrorKind::HttpStatus(200)
         );
+    }
+
+    #[test]
+    fn malformed_reasons_have_only_static_debug_and_display_text() {
+        for reason in [
+            MalformedResponseReason::Endpoint,
+            MalformedResponseReason::BodySize,
+            MalformedResponseReason::XmlSyntax,
+            MalformedResponseReason::XmlDeclaration,
+            MalformedResponseReason::XmlDoctype,
+            MalformedResponseReason::XmlMarkup,
+            MalformedResponseReason::XmlAttribute,
+            MalformedResponseReason::XmlDepth,
+            MalformedResponseReason::XmlFieldLimit,
+            MalformedResponseReason::XmlNodeLimit,
+            MalformedResponseReason::DictionaryKey,
+            MalformedResponseReason::DictionaryType,
+            MalformedResponseReason::MissingField,
+            MalformedResponseReason::FieldType,
+            MalformedResponseReason::MissingStatus,
+            MalformedResponseReason::StatusType,
+            MalformedResponseReason::MissingSecret,
+            MalformedResponseReason::SecretType,
+            MalformedResponseReason::SecretEncoding,
+            MalformedResponseReason::SecretSize,
+        ] {
+            let text = format!("{reason} {reason:?} {:?}", malformed(reason));
+            for forbidden in ["MARKER", "spim", "ptm", "tk", "cpim", "?secret="] {
+                assert!(!text.contains(forbidden));
+            }
+        }
     }
 }

@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use coffer_anisette::{
     AnisetteContext, BridgeError, CofferAnisetteError, CofferAnisetteProvider,
-    ProvisioningErrorKind, ProvisioningStage, Stage as BridgeStage,
+    MalformedResponseReason, ProvisioningErrorKind, ProvisioningStage, Stage as BridgeStage,
 };
 use coffer_bootstrap::{
     AppleCdnSource, Bootstrap, BootstrapError, BootstrapPaths, Stage as BootstrapStage,
@@ -334,13 +334,43 @@ fn provisioning_kind_label(kind: ProvisioningErrorKind) -> &'static str {
         }
         ProvisioningErrorKind::HttpStatus(status) => http_status_label(status),
         ProvisioningErrorKind::ContentType => "the response content type was wrong",
-        ProvisioningErrorKind::MalformedResponse => "the response was malformed or oversized",
+        ProvisioningErrorKind::MalformedResponse(reason) => malformed_response_label(reason),
         ProvisioningErrorKind::ProtocolStatus(_) => "the server reported a protocol error",
         ProvisioningErrorKind::Native(error) => bridge_label(error),
         ProvisioningErrorKind::Cancelled => "the attempt was cancelled",
         ProvisioningErrorKind::WorkerUnavailable => "the worker could not be started",
         ProvisioningErrorKind::InvalidContext => "the provisioning header context is invalid",
         _ => "provisioning failed",
+    }
+}
+
+fn malformed_response_label(reason: MalformedResponseReason) -> &'static str {
+    match reason {
+        MalformedResponseReason::Endpoint => "the response endpoint was not allowlisted",
+        MalformedResponseReason::BodySize => "the response body was empty or oversized",
+        MalformedResponseReason::XmlSyntax => "the response XML syntax was invalid",
+        MalformedResponseReason::XmlDeclaration => {
+            "the response XML declaration was duplicated or misplaced"
+        }
+        MalformedResponseReason::XmlDoctype => "the response plist doctype was not canonical",
+        MalformedResponseReason::XmlMarkup => "the response XML markup was unsupported",
+        MalformedResponseReason::XmlAttribute => "the response plist attributes were unsupported",
+        MalformedResponseReason::XmlDepth => "the response XML was nested too deeply",
+        MalformedResponseReason::XmlFieldLimit => "the response exceeded the plist field bound",
+        MalformedResponseReason::XmlNodeLimit => "the response exceeded the plist node bound",
+        MalformedResponseReason::DictionaryKey => {
+            "the response contained an invalid dictionary key"
+        }
+        MalformedResponseReason::DictionaryType => "the response required a dictionary value",
+        MalformedResponseReason::MissingField => "the response omitted a required field",
+        MalformedResponseReason::FieldType => "the response field had the wrong type",
+        MalformedResponseReason::MissingStatus => "the response omitted protocol status",
+        MalformedResponseReason::StatusType => "the response protocol status was malformed",
+        MalformedResponseReason::MissingSecret => "the response omitted a required secret",
+        MalformedResponseReason::SecretType => "the response secret had the wrong type",
+        MalformedResponseReason::SecretEncoding => "the response secret encoding was invalid",
+        MalformedResponseReason::SecretSize => "the response secret exceeded its size bound",
+        _ => "the response was malformed or oversized",
     }
 }
 
@@ -696,5 +726,39 @@ mod tests {
         ))
         .labels();
         assert!(!kind.contains("45054"));
+
+        for reason in [
+            MalformedResponseReason::Endpoint,
+            MalformedResponseReason::BodySize,
+            MalformedResponseReason::XmlSyntax,
+            MalformedResponseReason::XmlDeclaration,
+            MalformedResponseReason::XmlDoctype,
+            MalformedResponseReason::XmlMarkup,
+            MalformedResponseReason::XmlAttribute,
+            MalformedResponseReason::XmlDepth,
+            MalformedResponseReason::XmlFieldLimit,
+            MalformedResponseReason::XmlNodeLimit,
+            MalformedResponseReason::DictionaryKey,
+            MalformedResponseReason::DictionaryType,
+            MalformedResponseReason::MissingField,
+            MalformedResponseReason::FieldType,
+            MalformedResponseReason::MissingStatus,
+            MalformedResponseReason::StatusType,
+            MalformedResponseReason::MissingSecret,
+            MalformedResponseReason::SecretType,
+            MalformedResponseReason::SecretEncoding,
+            MalformedResponseReason::SecretSize,
+        ] {
+            let (_, kind) = HarnessError::Anisette(AnisetteStageError::Provisioning(
+                crate::anisette::ProvisioningFailure {
+                    stage: ProvisioningStage::StartRequest,
+                    kind: ProvisioningErrorKind::MalformedResponse(reason),
+                },
+            ))
+            .labels();
+            for forbidden in ["MARKER", "spim", "ptm", "tk", "cpim", "?secret="] {
+                assert!(!kind.contains(forbidden));
+            }
+        }
     }
 }
