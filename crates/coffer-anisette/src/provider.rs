@@ -299,6 +299,10 @@ fn generate_from_source(
     if cancelled.load(Ordering::Acquire) {
         return Err(CofferAnisetteError::WorkerUnavailable);
     }
+    validate_public_value(&values[5])
+        .map_err(|_| CofferAnisetteError::Bridge(BridgeError::InvalidMessage))?;
+    values[5].zeroize();
+    values[5].push_str(crate::LOCAL_CLIENT_INFO);
     let client_time = context.clock.now()?;
     validate_public_value(&client_time).map_err(|_| CofferAnisetteError::InvalidTime)?;
     let [
@@ -577,6 +581,60 @@ mod tests {
 
     struct FakeHeaders(Result<Vec<String>, CofferAnisetteError>);
 
+    struct HeaderOrderProxy;
+
+    impl AdiProxy for HeaderOrderProxy {
+        fn is_machine_provisioned(&mut self) -> Result<bool, AdiError> {
+            Ok(true)
+        }
+
+        fn set_android_id(&mut self, _android_id: &[u8; 16]) -> Result<(), AdiError> {
+            Ok(())
+        }
+
+        fn start_provisioning(
+            &mut self,
+            _spim: LocalBytes,
+            _local_user_id: &LocalString,
+        ) -> Result<ProvisioningStart, AdiError> {
+            Err(AdiError::OperationFailed)
+        }
+
+        fn end_provisioning(
+            &mut self,
+            _session: LocalProvisioningSession,
+            _ptm: LocalBytes,
+            _tk: LocalBytes,
+        ) -> Result<(), AdiError> {
+            Err(AdiError::OperationFailed)
+        }
+
+        fn destroy_provisioning(
+            &mut self,
+            _session: LocalProvisioningSession,
+        ) -> Result<(), AdiError> {
+            Err(AdiError::OperationFailed)
+        }
+
+        fn request_otp(
+            &mut self,
+            _local_user_id: &LocalString,
+        ) -> Result<LocalOtpMaterial, AdiError> {
+            Ok(LocalOtpMaterial::new(
+                LocalBytes::try_from_vec(vec![1])?,
+                LocalBytes::try_from_vec(vec![2])?,
+            ))
+        }
+
+        fn routing_info(&mut self) -> Result<String, AdiError> {
+            Ok("17106176".to_owned())
+        }
+
+        fn serial_number(&mut self) -> Result<String, AdiError> {
+            Ok("0".to_owned())
+        }
+    }
+
     impl LocalHeaderSource for FakeHeaders {
         fn headers(&mut self) -> Result<Vec<String>, CofferAnisetteError> {
             std::mem::replace(&mut self.0, Err(CofferAnisetteError::WorkerUnavailable))
@@ -633,7 +691,8 @@ mod tests {
                 "17106176".to_owned(),
                 "local-user".to_owned(),
                 "0".to_owned(),
-                "<client>".to_owned(),
+                "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+                    .to_owned(),
                 "device".to_owned(),
             ]))));
         let context = AnisetteContext::new("UTC".to_owned(), "en_US".to_owned())
@@ -645,12 +704,80 @@ mod tests {
         assert_eq!(data.routing_info, "17106176");
         assert_eq!(data.local_user_id, "local-user");
         assert_eq!(data.serial_number, "0");
-        assert_eq!(data.client_info, "<client>");
+        assert_eq!(data.client_info, crate::LOCAL_CLIENT_INFO);
+        assert!(!data.client_info.contains("com.apple.dt.Xcode"));
         assert_eq!(data.device_id, "device");
         assert_eq!(data.client_time, "2026-09-04T00:00:00Z");
         assert_eq!(data.time_zone, "UTC");
         assert_eq!(data.locale, "en_US");
         data.validate().expect("valid headers");
+    }
+
+    #[test]
+    fn local_source_client_info_slot_matches_the_protocol_order() {
+        let identity = DeviceIdentity::from_random_identifier([0; 16]);
+        let mut provider =
+            LocalAnisetteProvider::new(HeaderOrderProxy, identity).expect("local source");
+        let headers = provider.get_headers().expect("local headers");
+
+        assert_eq!(
+            headers.iter().nth(5).map(|(name, _)| name),
+            Some(coffer_protocol::anisette::CLIENT_INFO_HEADER)
+        );
+    }
+
+    #[test]
+    fn valid_source_client_info_is_always_replaced_by_the_local_profile() {
+        for source_client_info in [
+            "<arbitrary-client>",
+            "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>",
+        ] {
+            let source: Mutex<Box<dyn LocalHeaderSource>> =
+                Mutex::new(Box::new(FakeHeaders(Ok(vec![
+                    "otp".to_owned(),
+                    "mid".to_owned(),
+                    "17106176".to_owned(),
+                    "local-user".to_owned(),
+                    "0".to_owned(),
+                    source_client_info.to_owned(),
+                    "device".to_owned(),
+                ]))));
+            let context = AnisetteContext::new("UTC".to_owned(), "en_US".to_owned())
+                .expect("context")
+                .with_clock(Arc::new(FixedClock("2026-09-04T00:00:00Z")));
+            let data = generate_from_source(&source, &context, &AtomicBool::new(false))
+                .expect("local profile");
+
+            assert_eq!(data.client_info, crate::LOCAL_CLIENT_INFO);
+            assert!(!data.client_info.contains("com.apple.dt.Xcode"));
+        }
+    }
+
+    #[test]
+    fn malformed_source_client_info_is_rejected_before_replacement() {
+        for source_client_info in [
+            "client\r\ninjected".to_owned(),
+            "x".repeat(coffer_protocol::anisette::MAX_ANISETTE_VALUE_LEN + 1),
+        ] {
+            let source: Mutex<Box<dyn LocalHeaderSource>> =
+                Mutex::new(Box::new(FakeHeaders(Ok(vec![
+                    "otp".to_owned(),
+                    "mid".to_owned(),
+                    "17106176".to_owned(),
+                    "local-user".to_owned(),
+                    "0".to_owned(),
+                    source_client_info,
+                    "device".to_owned(),
+                ]))));
+            let context = AnisetteContext::new("UTC".to_owned(), "en_US".to_owned())
+                .expect("context")
+                .with_clock(Arc::new(FixedClock("2026-09-04T00:00:00Z")));
+
+            assert!(matches!(
+                generate_from_source(&source, &context, &AtomicBool::new(false)),
+                Err(CofferAnisetteError::Bridge(BridgeError::InvalidMessage))
+            ));
+        }
     }
 
     #[test]

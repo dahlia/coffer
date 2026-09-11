@@ -50,8 +50,6 @@ const FINISH_ENDPOINT: &str =
 // and MIT Anisette.py a61cddfb2275187822ad0c3999af747b8c9a4f9a.
 const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0";
 const CLIENT_APP_NAME: &str = "Setup";
-const CLIENT_INFO: &str =
-    "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>";
 const PLIST_DOCTYPE: &str = "plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"";
 const PLIST_PREAMBLE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
 
@@ -83,7 +81,7 @@ impl ProvisioningContext {
         Ok(ProvisioningHeaders {
             local_user_id: Zeroizing::new(self.local_user_id.to_string()),
             device_id: Zeroizing::new(self.device_id.to_string()),
-            client_info: CLIENT_INFO,
+            client_info: crate::LOCAL_CLIENT_INFO,
             client_time: Zeroizing::new(client_time),
             time_zone: &self.time_zone,
             locale: &self.locale,
@@ -1647,11 +1645,16 @@ mod tests {
         let context = context();
         let headers = context.headers().expect("headers");
         assert_eq!(
+            crate::LOCAL_CLIENT_INFO,
+            "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+        );
+        assert!(!crate::LOCAL_CLIENT_INFO.contains("com.apple.dt.Xcode"));
+        assert_eq!(
             headers.entries().as_slice(),
             [
                 ("X-Apple-I-MD-LU", "local-user"),
                 ("X-Mme-Device-Id", "device-id"),
-                ("X-Mme-Client-Info", CLIENT_INFO),
+                ("X-Mme-Client-Info", crate::LOCAL_CLIENT_INFO),
                 ("X-Apple-I-Client-Time", "2026-09-04T00:00:00Z"),
                 ("X-Apple-I-TimeZone", "UTC"),
                 ("X-Apple-Locale", "en_US"),

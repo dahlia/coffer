@@ -55,6 +55,13 @@ mod sandbox;
 mod state;
 mod types;
 
+// This fixed local profile identifies the daemon role that performs GSA
+// authentication. AltStore commit c558994501bac639780a853ffb54065cc703b770
+// and pull request 1790 document Apple's edge rejecting the legacy Xcode
+// client token before authentication reached GSA.
+pub(crate) const LOCAL_CLIENT_INFO: &str =
+    "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
 pub use bridge::{AdiOwnedBuffer, PropertyKey};
 pub use client::{HelperClient, ProvisioningSession, SmokeResult, VerifiedLibraryPaths};
 pub use error::{BridgeError, Stage};
