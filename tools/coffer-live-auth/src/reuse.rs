@@ -438,7 +438,11 @@ mod tests {
         let initial = std::fs::read(&slot_path).unwrap();
         for (status, now, expected) in [
             (200, 1, Ok(())),
-            (401, 1, Err(ReuseError::Token(TokenError::Rejected))),
+            (
+                401,
+                1,
+                Err(ReuseError::Token(TokenError::Http { status: 401 })),
+            ),
             (
                 403,
                 1,

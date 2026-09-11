@@ -60,14 +60,17 @@ serialization; neither proves that the earlier compact/string-flag request
 caused HTTP 404. The fixed endpoint and client-info remain unchanged.
 
 HTTP 200 is insufficient: `Response.Status.ec` must be integer zero and an
-`au` selector stops the attempt. HTTP 401 is a rejection without challenge
-handling. No undocumented server error number means “session expired.” Other
-HTTP, transport, malformed, oversized, unsupported, authentication-tag, clock,
-and locally expired-token outcomes remain distinct fixed classifications.
-General HTTP failures preserve only the numeric status in `TokenError::Http`;
-the harness reports it without headers or response content. This identifies the
-HTTP outcome, not its underlying cause or permission to retry. Remote text and
-adapter error strings never become diagnostic output.
+`au` selector stops the attempt. Non-200 HTTP responses, including 401, preserve
+only their numeric status in `TokenError::Http`; challenge handling is disabled.
+An HTTP 200 protocol rejection instead retains only the numeric `ec` and a
+boolean indicating whether `au` was present. The selector value and remote
+message are never retained in an error. No undocumented server error number
+means “session expired.” Transport, malformed, oversized, unsupported,
+authentication-tag, clock, and locally expired-token outcomes remain distinct
+fixed classifications. These diagnostics identify the failing stage, not its
+underlying cause or permission to retry. The harness reports them without
+headers or response content. Remote text and adapter error strings never become
+diagnostic output.
 
 The encrypted `et` data contains three bytes `XYZ` as AAD, a 16-byte IV,
 ciphertext, then a 16-byte tag. RustCrypto `AesGcm<Aes256, U16>` authenticates

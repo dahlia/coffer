@@ -184,7 +184,7 @@ pub enum TokenError {
     Anisette,
     /// A transport failed; the outcome may be unknown and must not be retried.
     Transport,
-    /// An HTTP response had a status other than 200 or 401.
+    /// An HTTP response had a status other than 200.
     ///
     /// Retains only the numeric status, never headers or response material.
     /// This does not establish session expiry or permit a retry.
@@ -194,7 +194,13 @@ pub enum TokenError {
     },
     /// The server rejected the session/request or requested additional authentication.
     /// No undocumented status code is interpreted as session expiry.
-    Rejected,
+    Rejected {
+        /// Apple's numeric protocol status, not interpreted as session expiry.
+        code: i64,
+        /// Whether an additional-authentication selector was present.
+        /// The selector value is never retained.
+        additional_authentication: bool,
+    },
     /// The XML grammar, field types, required fields, or numeric ranges were invalid.
     Malformed,
     /// A byte, element, depth, or scalar bound was exceeded.
@@ -217,7 +223,9 @@ impl fmt::Display for TokenError {
             Self::Http { status } => {
                 return write!(f, "service-token request returned HTTP {status}");
             }
-            Self::Rejected => "service-token request was rejected",
+            Self::Rejected { code, additional_authentication } => {
+                return write!(f, "service-token protocol rejection: code {code}; additional authentication: {additional_authentication}");
+            }
             Self::Malformed => "malformed service-token response",
             Self::TooLarge => "service-token response exceeds a bound",
             Self::Unsupported => "unsupported service-token response format or service",
@@ -282,9 +290,6 @@ impl<'a, T: Transport, A: AnisetteProvider> TokenClient<'a, T, A> {
                     TransportError::ResponseTooLarge { .. } => TokenError::TooLarge,
                     _ => TokenError::Transport,
                 })?;
-        if response.status() == 401 {
-            return Err(TokenError::Rejected);
-        }
         if response.status() != 200 {
             return Err(TokenError::Http {
                 status: response.status(),

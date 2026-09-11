@@ -354,7 +354,7 @@ fn inner_fields_types_duplicates_expiry_and_service_are_validated() {
 
 #[test]
 fn http_status_diagnostics_exclude_response_material() {
-    for status in [400, 403, 429, 500, 503] {
+    for status in [400, 401, 403, 429, 500, 503] {
         let error = outcome(support::reply(status, b"SYNTHETIC-SECRET-BODY"), &key()).unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -365,24 +365,66 @@ fn http_status_diagnostics_exclude_response_material() {
 }
 
 #[test]
+fn rejection_diagnostics_distinguish_http_and_embedded_status() {
+    assert_eq!(
+        outcome(support::reply(401, b"SYNTHETIC-SECRET-BODY"), &key())
+            .unwrap_err()
+            .to_string(),
+        "service-token request returned HTTP 401"
+    );
+    for (code, auth) in [(-999999, false), (0, true), (-999999, true)] {
+        let selector = if auth {
+            "<key>au</key><string>SYNTHETIC-SELECTOR</string>"
+        } else {
+            ""
+        };
+        let body = format!(
+            "<plist version=\"1.0\"><dict><key>Response</key><dict><key>Status</key><dict><key>ec</key><integer>{code}</integer><key>em</key><string>SYNTHETIC-ERROR</string>{selector}</dict></dict></dict></plist>"
+        );
+        let error = failure(body.into_bytes());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "service-token protocol rejection: code {code}; additional authentication: {auth}"
+            )
+        );
+        assert!(!format!("{error:?}").contains("SYNTHETIC"));
+    }
+}
+
+#[test]
 fn rejection_http_transport_and_custom_adapter_errors_never_retry_or_leak() {
     use coffer_protocol::{
         anisette::{AnisetteData, AnisetteError, AnisetteProvider},
         transport::TransportError,
     };
     let good = String::from_utf8(fixture("apptokens/response.plist")).unwrap();
-    for body in [
-        good.replace("<integer>0</integer>", "<integer>-999999</integer>"),
-        good.replace(
-            "<key>ec</key>",
-            "<key>au</key><string>SYNTHETIC-REMOTE</string><key>ec</key>",
+    for (body, code, additional_authentication) in [
+        (
+            good.replace("<integer>0</integer>", "<integer>-999999</integer>"),
+            -999999,
+            false,
+        ),
+        (
+            good.replace(
+                "<key>ec</key>",
+                "<key>au</key><string>SYNTHETIC-REMOTE</string><key>ec</key>",
+            ),
+            0,
+            true,
         ),
     ] {
-        assert_eq!(failure(body.into_bytes()), TokenError::Rejected);
+        assert_eq!(
+            failure(body.into_bytes()),
+            TokenError::Rejected {
+                code,
+                additional_authentication
+            }
+        );
     }
     assert_eq!(
         outcome(support::reply(401, b"SYNTHETIC-BODY"), &key()).unwrap_err(),
-        TokenError::Rejected
+        TokenError::Http { status: 401 }
     );
     for status in [201, 204, 301, 302, 403, 407, 429, 500, 503] {
         assert_eq!(

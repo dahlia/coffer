@@ -165,7 +165,10 @@ pub(super) fn response(
         selector.text()?;
     }
     if code != 0 || secondary.is_some() {
-        return Err(Error::Rejected);
+        return Err(Error::Rejected {
+            code,
+            additional_authentication: secondary.is_some(),
+        });
     }
     let envelope = response.get("et")?.data()?;
     let plaintext = decrypt(envelope, session.key)?;
