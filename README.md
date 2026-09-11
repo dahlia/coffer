@@ -91,13 +91,16 @@ semantics, and failure behavior are sufficiently understood and tested.
 
 ### No hidden remote anisette service
 
-Coffer intends to generate anisette data locally through SideStore's
-[`apple-private-apis`] project, particularly its `omnisette` crate, instead of
-depending on a separately hosted anisette service.
+Coffer generates anisette data locally from a pinned, MPL-2.0 subset of
+SideStore's [`apple-private-apis`] project. The production dependency graph
+contains neither a remote provider nor a fallback to one, and the canonical
+gate verifies that invariant.
 
-On platforms where Apple's Android support libraries are required, Coffer may
-retrieve those libraries from Apple at runtime. Proprietary Apple binaries must
-not be committed to or redistributed with the Coffer source repository.
+On Linux, Coffer retrieves the required Android support libraries directly from
+an Apple-controlled distribution endpoint at runtime. It verifies and caches
+them separately from durable anisette provisioning state. Proprietary Apple
+binaries are never committed to the source repository or included in Coffer
+releases.
 
 [`apple-private-apis`]: https://github.com/SideStore/apple-private-apis
 
@@ -118,13 +121,20 @@ license terms.
 Third-party dependencies retain their respective licenses.
 
 
-Planned capabilities
---------------------
+Implemented foundations
+-----------------------
 
-Coffer is expected to grow incrementally. Planned capabilities include:
+Coffer currently provides developer-facing foundations for:
 
- -  Signing in to an Apple Account using Apple's native authentication flow.
- -  Local anisette generation without a separately managed server.
+ -  Signing in to an Apple Account through GSA/SRP and trusted-device 2FA.
+ -  Local anisette generation without a separately managed server or remote
+    fallback.
+ -  Runtime acquisition and sandboxed use of the required Apple support
+    libraries.
+ -  Persistence of reusable authentication material in Linux Secret Service.
+
+The remaining planned capabilities include:
+
  -  Joining the account's Apple Passwords trust using Octagon.
  -  Reading and decrypting CKKS keychain records from CloudKit.
  -  Synchronizing website passwords.
@@ -132,7 +142,8 @@ Coffer is expected to grow incrementally. Planned capabilities include:
  -  Hide My Email address discovery.
  -  A native GTK 4/libadwaita credential browser.
  -  Firefox and Chromium-compatible browser autofill.
- -  Secure local caching and integration with Secret Service.
+ -  Secure local credential caching, with its keys protected through Secret
+    Service.
  -  Incremental background synchronization.
  -  Eventually, creating, updating, and deleting credentials.
  -  Eventually, passkey support.
@@ -144,42 +155,34 @@ safety requirements attached to later milestones.
 Architecture
 ------------
 
-The precise crate layout will evolve while the protocol implementation is
-validated, but Coffer is expected to separate the following responsibilities:
+The current Milestone 1 workspace separates protocol logic, local anisette,
+platform storage, and developer tooling:
 
 ~~~~ text
 Coffer
 │
-├── GNOME application
-│   └── GTK 4 + libadwaita
-│
-├── application/service layer
-│   ├── synchronization
-│   ├── local encrypted storage
-│   └── platform integration
-│
-├── browser integration
-│   ├── native messaging host
-│   └── WebExtension
-│
-└── Apple protocol layer
-    ├── authentication
-    │   └── apple-private-apis
-    │       ├── icloud-auth
-    │       └── omnisette
-    ├── CloudKit/CKCode
-    ├── Octagon
-    └── CKKS
+├── coffer-protocol
+│   └── GSA/SRP authentication and trusted-device 2FA
+├── coffer-bootstrap
+│   └── bounded, atomic acquisition of Apple support libraries
+├── coffer-anisette
+│   ├── sandboxed Apple-library helper and provisioning
+│   └── pinned local-only omnisette subset
+├── coffer-service
+│   └── reusable sessions in Linux Secret Service
+└── coffer-live-auth
+    └── developer-only end-to-end validation harness
 ~~~~
 
-The protocol and synchronization layers must remain independent of GTK. A
-command-line or test harness should be able to exercise them without starting a
-graphical session.
+`coffer-protocol` owns the runtime-neutral Apple authentication state machine
+and performs no I/O itself. `coffer-anisette` depends on it and combines the
+verified bootstrap output with the vendored local-only `omnisette` surface.
+`coffer-service` is a sibling adapter layer, so Secret Service never enters the
+protocol crate. The developer harness composes these layers without GTK.
 
-The workspace currently contains a single crate, `coffer-protocol` under
-*crates/*, which is the Apple protocol layer. The remaining layers will be added
-as separate crates that depend on it, and only the GNOME application crate will
-depend on GTK and libadwaita.
+Future synchronization, command-line, and GNOME application layers must reuse
+these boundaries. Only the GNOME application crate may depend on GTK or
+libadwaita.
 
 Likewise, browser integration must consume a narrow application-facing
 interface rather than directly accessing decrypted keychain internals.
@@ -221,6 +224,13 @@ mise run ci
 `build`, `doc`, and the dependency audit `deny`; it checks formatting but never
 rewrites files. Continuous integration runs the same task. Run `mise tasks` for
 the complete list.
+
+Maintainers can run the interactive, developer-only authentication validation
+with `mise run test-live-auth`. It is intentionally excluded from ordinary
+tests, `mise run ci`, and GitHub Actions because it contacts Apple and may
+consume authentication and 2FA attempts. See
+[*tools/coffer-live-auth/README.md*](./tools/coffer-live-auth/README.md) before
+running it.
 
 The Rust toolchain, including `rustfmt`, Clippy, and rust-analyzer, is pinned in
 *mise.toml*. The repository treats Rust and Clippy warnings as errors.

@@ -16,12 +16,11 @@
 
 //! Apple protocol layer for Coffer.
 //!
-//! This crate is the home of everything that talks to Apple's services:
-//! Apple Account authentication and anisette provisioning, the CloudKit
-//! transport, Octagon trust, and CKKS key and record handling.  Higher layers
-//! of Coffer (the application and service layer, the command-line interface,
-//! the GNOME application, and browser integration) consume the typed API this
-//! crate exposes; they never reach into protocol internals directly.
+//! This crate owns Coffer's runtime-neutral Apple protocol logic.  Higher
+//! layers of Coffer (the application and service layer, the command-line
+//! interface, the GNOME application, and browser integration) consume the
+//! typed API this crate exposes; they never reach into protocol internals
+//! directly.
 //!
 //! # Invariants
 //!
@@ -47,9 +46,11 @@
 //! Account authentication in the [`auth`] module: the GSA (GrandSlam
 //! Authentication) SRP password exchange, trusted-device two-factor
 //! submission, and the post-two-factor re-authentication that yields a
-//! usable session.  Anisette generation, a concrete HTTP transport, secret
-//! storage, and everything past authentication are scheduled for later work;
-//! see the project roadmap.
+//! usable session.  Sibling crates provide local anisette generation, the
+//! concrete developer-harness transport, and Linux Secret Service storage so
+//! those platform concerns do not enter this runtime-neutral protocol layer.
+//! CloudKit, Octagon, CKKS, and everything past authentication remain later
+//! work; see the project roadmap.
 #![forbid(unsafe_code)]
 
 pub mod anisette;

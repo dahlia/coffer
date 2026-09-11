@@ -23,8 +23,9 @@
 //! helper revalidates the complete observed ELF ABI policy before mapping the
 //! images with `elf_loader` 0.17.0 and constructors deferred.
 //!
-//! No API in this crate performs provisioning HTTP, Apple Account
-//! authentication, or two-factor authentication.  Typed operations cover the
+//! Apple Account authentication and two-factor authentication remain outside
+//! this crate.  Its parent-side provisioning coordinator performs the bounded
+//! Apple provisioning HTTP exchange, while typed helper operations cover the
 //! complete declared ADI surface.  Each ordinary operation uses one helper;
 //! provisioning start and exactly one finish/cancel frame stay in one helper
 //! so the opaque native session handle never crosses IPC.  Failures are

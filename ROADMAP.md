@@ -66,37 +66,52 @@ anisette server.
 
 ### Local anisette
 
- -  [ ] Integrate SideStore's `apple-private-apis`.
- -  [ ] Use `omnisette` directly from Rust.
- -  [ ] Disable implicit remote-anisette fallback.
- -  [ ] Define a stable local location for anisette provisioning state.
- -  [ ] Implement runtime bootstrap for the Apple libraries needed by the
+ -  [x] Integrate SideStore's `apple-private-apis`.
+ -  [x] Use `omnisette` directly from Rust.
+ -  [x] Disable implicit remote-anisette fallback.
+ -  [x] Define a stable local location for anisette provisioning state.
+ -  [x] Implement runtime bootstrap for the Apple libraries needed by the
     local provider.
- -  [ ] Retrieve proprietary libraries only from Apple-controlled distribution
+ -  [x] Retrieve proprietary libraries only from Apple-controlled distribution
     endpoints.
- -  [ ] Never commit or redistribute Apple proprietary binaries.
- -  [ ] Handle updates to the underlying Apple libraries without silently
+ -  [x] Never commit or redistribute Apple proprietary binaries.
+ -  [x] Handle updates to the underlying Apple libraries without silently
     corrupting existing provisioning state.
 
 ### Apple Account authentication
 
- -  [ ] Evaluate `apple-private-apis`‘ `icloud-auth` implementation against the
+ -  [x] Evaluate `apple-private-apis`‘ `icloud-auth` implementation against the
     authentication behavior needed by Coffer.
- -  [ ] Reuse or extend it where licensing and behavior permit.
- -  [ ] Implement the remaining native GSA authentication flow.
- -  [ ] Support trusted-device two-factor authentication.
- -  [ ] Represent authentication states explicitly rather than as loosely
+ -  [x] Implement the required authentication behavior independently after the
+    evaluation, documenting deliberate deviations.
+ -  [x] Implement the remaining native GSA authentication flow.
+ -  [x] Support trusted-device two-factor authentication.
+ -  [x] Represent authentication states explicitly rather than as loosely
     coupled network calls.
- -  [ ] Store reusable authentication secrets through Secret Service.
- -  [ ] Ensure passwords, PETs, service tokens, SRP material, and 2FA codes are
+ -  [x] Store reusable authentication secrets through Secret Service.
+ -  [x] Ensure passwords, PETs, service tokens, SRP material, and 2FA codes are
     never logged.
- -  [ ] Distinguish initial authentication failure from post-2FA
+ -  [x] Distinguish initial authentication failure from post-2FA
     reauthentication failure.
- -  [ ] Do not automatically retry authentication attempts.
+ -  [x] Do not automatically retry authentication attempts.
 
 Authentication tests should use deterministic cryptographic and serialization
 fixtures wherever possible. Tests against a real Apple Account must be
 explicitly invoked and must never run in ordinary CI.
+
+All Milestone 1 items are implemented and covered by deterministic offline
+tests. A developer-only live validation on 11 September 2026 additionally
+verified existing local provisioning and anisette generation against Apple,
+the initial GSA/SRP exchange, trusted-device code delivery and submission,
+post-2FA reauthentication, and a Secret Service write followed by a reload over
+a new connection. The production dependency graph contains no remote-anisette
+provider or fallback.
+
+That live validation proved persistence and reload of the reusable GSA session
+material, not an authenticated network session resumed from it. Coffer does not
+yet implement the `apptokens`/service-token request. CloudKit configuration and
+service tokens remain Milestone 2 work, and long-lived automatic session
+renewal remains Milestone 6 work.
 
 
 Milestone 2: Read-only Apple Passwords (formerly iCloud Keychain) core
