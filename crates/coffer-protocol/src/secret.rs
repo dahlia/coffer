@@ -152,7 +152,7 @@ redacted_debug!(VerificationCode);
 /// appears in errors.  It is sent to Apple as the SRP identity `u` and is
 /// hashed into the SRP client proof.
 #[derive(Clone, PartialEq, Eq)]
-pub struct AccountName(String);
+pub struct AccountName(Zeroizing<String>);
 
 /// Reasons an account name is rejected before any network request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,11 +185,16 @@ impl std::error::Error for InvalidAccountName {}
 impl AccountName {
     /// Validates and wraps an account name.
     ///
+    /// Takes ownership of the `String` and places it in zeroizing storage
+    /// before validation, so the input is wiped whether validation succeeds or
+    /// fails.
+    ///
     /// # Errors
     ///
     /// Returns [`InvalidAccountName`] for an empty, oversized, or
     /// control-character-bearing name.
     pub fn new(name: String) -> Result<Self, InvalidAccountName> {
+        let name = Zeroizing::new(name);
         if name.is_empty() {
             return Err(InvalidAccountName::Empty);
         }
@@ -210,12 +215,6 @@ impl AccountName {
 }
 
 redacted_debug!(AccountName);
-
-impl Drop for AccountName {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
 
 /// The account's directory services identifier (`adsid`).
 ///
