@@ -108,7 +108,7 @@ pub fn sample_anisette() -> AnisetteData {
         routing_info: "17106176".to_owned(),
         local_user_id: "SYNTHETICLOCALUSERID000000000000".to_owned(),
         serial_number: "0".to_owned(),
-        client_info: "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+        client_info: "<Mac14,2> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
             .to_owned(),
         device_id: "00000000-0000-4000-8000-000000000000".to_owned(),
         client_time: "2026-09-04T00:00:00Z".to_owned(),

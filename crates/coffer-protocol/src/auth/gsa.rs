@@ -64,11 +64,15 @@ pub const SUPPORTED_PROTOCOL: &str = "s2k";
 
 const ADVERTISED_PROTOCOLS: [&str; 2] = ["s2k", "s2k_fo"];
 const HEADER_VERSION: &str = "1.0.1";
-const GSA_USER_AGENT: &str = "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0";
+// Fixed public compatibility values live-verified by xtool PR #257, commit
+// 450223eb07ae3112f4e8ee4bc5d460f489bd9e85. They describe the AuthKit client,
+// not the current host. The Xcode token is valid in this User-Agent; Apple's
+// edge rejection applies to that token in X-MMe-Client-Info instead.
+const GSA_USER_AGENT: &str = "AuthKit/1 (Macintosh; OS X 27.0) (com.apple.dt.Xcode/26.5)";
 const PLIST_CONTENT_TYPE: &str = "text/x-xml-plist";
 const SECOND_FACTOR_USER_AGENT: &str = "Xcode";
 const SECOND_FACTOR_APP_INFO: &str = "com.apple.gs.xcode.auth";
-const SECOND_FACTOR_XCODE_VERSION: &str = "11.2 (11B41)";
+const SECOND_FACTOR_XCODE_VERSION: &str = "26.5 (17F42)";
 const SECOND_FACTOR_ACCEPT_LANGUAGE: &str = "en-us";
 
 /// Trusted-device secondary authentication, the only `au` value this crate

@@ -55,11 +55,21 @@ mod sandbox;
 mod state;
 mod types;
 
-// This fixed local profile identifies the daemon role that performs GSA
-// authentication. AltStore commit c558994501bac639780a853ffb54065cc703b770
-// and pull request 1790 document Apple's edge rejecting the legacy Xcode
-// client token before authentication reached GSA.
-pub(crate) const LOCAL_CLIENT_INFO: &str =
+// These endpoint-specific compatibility profiles are public wire labels, not
+// descriptions assembled from the host or data persisted with native state.
+// xtool PR #257 (commit 450223eb07ae3112f4e8ee4bc5d460f489bd9e85)
+// live-verified the authentication OS/AuthKit tuple. AltStore PR #1790
+// independently observed Mac14,2 reaching GSA and found the model/OS fields
+// immaterial to the edge rejection, while com.apple.akd replaced the blocked
+// Xcode client-info token.
+pub(crate) const LOCAL_AUTH_CLIENT_INFO: &str =
+    "<Mac14,2> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
+// Provisioning keeps the macOS 13 profile already verified with its pinned
+// CFNetwork/Darwin User-Agent. It intentionally differs from the newer GSA
+// profile so refreshing authentication cannot invalidate provisioning wire
+// compatibility or stored provisioning state.
+pub(crate) const LOCAL_PROVISIONING_CLIENT_INFO: &str =
     "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 
 pub use bridge::{AdiOwnedBuffer, PropertyKey};

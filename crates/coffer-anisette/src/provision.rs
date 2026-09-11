@@ -81,7 +81,7 @@ impl ProvisioningContext {
         Ok(ProvisioningHeaders {
             local_user_id: Zeroizing::new(self.local_user_id.to_string()),
             device_id: Zeroizing::new(self.device_id.to_string()),
-            client_info: crate::LOCAL_CLIENT_INFO,
+            client_info: crate::LOCAL_PROVISIONING_CLIENT_INFO,
             client_time: Zeroizing::new(client_time),
             time_zone: &self.time_zone,
             locale: &self.locale,
@@ -1645,16 +1645,16 @@ mod tests {
         let context = context();
         let headers = context.headers().expect("headers");
         assert_eq!(
-            crate::LOCAL_CLIENT_INFO,
+            crate::LOCAL_PROVISIONING_CLIENT_INFO,
             "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
         );
-        assert!(!crate::LOCAL_CLIENT_INFO.contains("com.apple.dt.Xcode"));
+        assert!(!crate::LOCAL_PROVISIONING_CLIENT_INFO.contains("com.apple.dt.Xcode"));
         assert_eq!(
             headers.entries().as_slice(),
             [
                 ("X-Apple-I-MD-LU", "local-user"),
                 ("X-Mme-Device-Id", "device-id"),
-                ("X-Mme-Client-Info", crate::LOCAL_CLIENT_INFO),
+                ("X-Mme-Client-Info", crate::LOCAL_PROVISIONING_CLIENT_INFO,),
                 ("X-Apple-I-Client-Time", "2026-09-04T00:00:00Z"),
                 ("X-Apple-I-TimeZone", "UTC"),
                 ("X-Apple-Locale", "en_US"),

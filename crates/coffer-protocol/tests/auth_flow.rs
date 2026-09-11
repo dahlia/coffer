@@ -153,12 +153,15 @@ fn login_without_second_factor_succeeds_in_two_requests() {
         assert_eq!(request.header("Accept"), Some("*/*"));
         assert_eq!(
             request.header("User-Agent"),
-            Some("akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0")
+            Some("AuthKit/1 (Macintosh; OS X 27.0) (com.apple.dt.Xcode/26.5)")
         );
         assert_eq!(
             request.header("X-MMe-Client-Info"),
             Some(support::sample_anisette().client_info.as_str())
         );
+        let client_info = request.header("X-MMe-Client-Info").unwrap();
+        assert!(!client_info.contains("com.apple.dt.Xcode"));
+        assert!(!client_info.contains("macOS;13.1;22C65"));
         assert_eq!(request.headers.len(), 4);
     }
 }
@@ -197,7 +200,7 @@ fn login_with_trusted_device_second_factor_succeeds_in_six_requests() {
         push.header("X-Apple-App-Info"),
         Some("com.apple.gs.xcode.auth")
     );
-    assert_eq!(push.header("X-Xcode-Version"), Some("11.2 (11B41)"));
+    assert_eq!(push.header("X-Xcode-Version"), Some("26.5 (17F42)"));
     assert_eq!(push.header("Content-Type"), Some("text/x-xml-plist"));
     assert_eq!(push.header("Accept"), Some("text/x-xml-plist"));
     let anisette = support::sample_anisette();
@@ -213,6 +216,9 @@ fn login_with_trusted_device_second_factor_succeeds_in_six_requests() {
         push.header("X-Mme-Client-Info"),
         Some(anisette.client_info.as_str())
     );
+    let client_info = push.header("X-Mme-Client-Info").unwrap();
+    assert!(!client_info.contains("com.apple.dt.Xcode"));
+    assert!(!client_info.contains("macOS;13.1;22C65"));
     assert_eq!(
         push.header("X-Mme-Device-Id"),
         Some(anisette.device_id.as_str())
@@ -224,6 +230,12 @@ fn login_with_trusted_device_second_factor_succeeds_in_six_requests() {
     assert_eq!(validate.method, Method::Get);
     assert_eq!(validate.url, VALIDATE_ENDPOINT);
     assert_eq!(validate.header("security-code"), Some("123456"));
+    assert_eq!(validate.header("User-Agent"), Some("Xcode"));
+    assert_eq!(validate.header("X-Xcode-Version"), Some("26.5 (17F42)"));
+    assert_eq!(
+        validate.header("X-Mme-Client-Info"),
+        Some(anisette.client_info.as_str())
+    );
     assert_eq!(
         validate.header("X-Apple-Identity-Token"),
         Some(expected_identity.as_str())

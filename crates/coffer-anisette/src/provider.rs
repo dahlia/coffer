@@ -302,7 +302,7 @@ fn generate_from_source(
     validate_public_value(&values[5])
         .map_err(|_| CofferAnisetteError::Bridge(BridgeError::InvalidMessage))?;
     values[5].zeroize();
-    values[5].push_str(crate::LOCAL_CLIENT_INFO);
+    values[5].push_str(crate::LOCAL_AUTH_CLIENT_INFO);
     let client_time = context.clock.now()?;
     validate_public_value(&client_time).map_err(|_| CofferAnisetteError::InvalidTime)?;
     let [
@@ -684,6 +684,10 @@ mod tests {
 
     #[test]
     fn all_ten_headers_are_composed_and_validated() {
+        assert_eq!(
+            crate::LOCAL_AUTH_CLIENT_INFO,
+            "<Mac14,2> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+        );
         let source: Mutex<Box<dyn LocalHeaderSource>> =
             Mutex::new(Box::new(FakeHeaders(Ok(vec![
                 "otp".to_owned(),
@@ -704,8 +708,9 @@ mod tests {
         assert_eq!(data.routing_info, "17106176");
         assert_eq!(data.local_user_id, "local-user");
         assert_eq!(data.serial_number, "0");
-        assert_eq!(data.client_info, crate::LOCAL_CLIENT_INFO);
+        assert_eq!(data.client_info, crate::LOCAL_AUTH_CLIENT_INFO);
         assert!(!data.client_info.contains("com.apple.dt.Xcode"));
+        assert!(!data.client_info.contains("macOS;13.1;22C65"));
         assert_eq!(data.device_id, "device");
         assert_eq!(data.client_time, "2026-09-04T00:00:00Z");
         assert_eq!(data.time_zone, "UTC");
@@ -748,8 +753,9 @@ mod tests {
             let data = generate_from_source(&source, &context, &AtomicBool::new(false))
                 .expect("local profile");
 
-            assert_eq!(data.client_info, crate::LOCAL_CLIENT_INFO);
+            assert_eq!(data.client_info, crate::LOCAL_AUTH_CLIENT_INFO);
             assert!(!data.client_info.contains("com.apple.dt.Xcode"));
+            assert!(!data.client_info.contains("macOS;13.1;22C65"));
         }
     }
 
