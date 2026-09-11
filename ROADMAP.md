@@ -108,10 +108,12 @@ a new connection. The production dependency graph contains no remote-anisette
 provider or fallback.
 
 That live validation proved persistence and reload of the reusable GSA session
-material, not an authenticated network session resumed from it. Coffer does not
-yet implement the `apptokens`/service-token request. CloudKit configuration and
-service tokens remain Milestone 2 work, and long-lived automatic session
-renewal remains Milestone 6 work.
+material, not an authenticated network session resumed from it. A subsequent
+offline-tested Phase 1 implements an explicit `apptokens` request for the Xcode
+authentication service using stored GSA material. That path has not been
+exercised against Apple and does not establish CloudKit access. CloudKit
+configuration and service tokens remain Milestone 2 work, and long-lived
+automatic session renewal remains Milestone 6 work.
 
 
 Milestone 2: Read-only Apple Passwords (formerly iCloud Keychain) core

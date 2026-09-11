@@ -489,7 +489,7 @@ impl Report {
                      (new profile slot)"
                 }
             },
-            "stored material: persistence only; no service-token refresh exists yet, so no \
+            "stored material: persistence only; this M1 flow performs no token issuance, so no \
              authenticated network session was resumed",
             "remote anisette fallback: absent by construction",
         ]

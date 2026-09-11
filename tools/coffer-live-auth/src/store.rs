@@ -16,10 +16,9 @@
 
 //! Persisting the reusable session and proving it reloads.
 //!
-//! What this verifies is deliberately narrow.  Milestone 1 has no
-//! service-token refresh: the protocol crate does not yet build the
-//! `apptokens` request, so nothing in Coffer can *use* a stored session to
-//! talk to Apple again.  The harness therefore claims only what it checks:
+//! What this verifies is deliberately narrow. The separate [`crate::reuse`]
+//! harness tests stored-session token issuance; this M1 round trip claims only
+//! what it checks:
 //! the reusable subset of the session is written to Secret Service under the
 //! profile slot, a second, independent connection to the same backend reads
 //! it back, and the four retained fields compare equal.  No field is ever

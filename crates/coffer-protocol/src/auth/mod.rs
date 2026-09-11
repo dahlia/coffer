@@ -116,7 +116,7 @@
 //! ```
 
 mod error;
-mod gsa;
+pub(crate) mod gsa;
 mod spd;
 mod srp;
 

@@ -50,10 +50,9 @@
 //!
 //! # What the success report does and does not claim
 //!
-//! The Secret Service line reports that the reusable session round-tripped
-//! through the keyring.  The protocol crate has no service-token refresh yet,
-//! so the harness does not, and must not, claim that a stored session was used
-//! to talk to Apple again.  The two-factor lines are reported as verified only
+//! The M1 Secret Service line reports only that the reusable session
+//! round-tripped through the keyring. The separate [`reuse`] harness exercises
+//! a stored-session Xcode token exchange after explicit confirmation.  The two-factor lines are reported as verified only
 //! on an account that actually required a trusted-device code during the run.
 
 #![forbid(unsafe_code)]
@@ -62,6 +61,7 @@ pub mod anisette;
 pub mod entropy;
 pub mod flow;
 pub mod harness;
+pub mod reuse;
 pub mod slot;
 pub mod store;
 pub mod terminal;
@@ -109,6 +109,8 @@ mod tests {
             ("flow.rs", include_str!("flow.rs")),
             ("harness.rs", include_str!("harness.rs")),
             ("main.rs", include_str!("main.rs")),
+            ("token_main.rs", include_str!("token_main.rs")),
+            ("reuse.rs", include_str!("reuse.rs")),
             ("slot.rs", include_str!("slot.rs")),
             ("store.rs", include_str!("store.rs")),
             ("terminal.rs", include_str!("terminal.rs")),

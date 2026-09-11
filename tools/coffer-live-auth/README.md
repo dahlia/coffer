@@ -69,6 +69,47 @@ The report lists static verdicts: local anisette, the initial SRP exchange,
 whether the trusted-device and post-2FA branches ran, the Secret Service store
 and reload, and the absence of a remote fallback. The two-factor lines are
 marked verified only if the account actually required a code during the run.
-The Secret Service line means persistence and reload only: the protocol crate
-has no service-token refresh yet, so no stored session is used to talk to Apple
-again.
+The M1 Secret Service line means persistence and reload only. This binary
+does not exercise the separate stored-session token path.
+
+
+Stored-session Xcode token check
+--------------------------------
+
+`coffer-live-token` is a separate developer-only binary. Build it and its
+helper without running either:
+
+~~~~ sh
+mise run build-live-token
+~~~~
+
+After independent review, full CI, and separate approval for one live token
+issuance, the interactive entry point is:
+
+~~~~ sh
+mise run test-live-token
+~~~~
+
+This operation may consume an authentication attempt. Its effect on previously
+issued tokens is unknown. It is excluded from ordinary tests and CI, takes no
+arguments, and reads only the word `ISSUE` from the controlling terminal.
+
+The binary loads the existing profile slot and GSA session over a fresh Secret
+Service connection. It checks existing support libraries with
+`Bootstrap::installed` and opens existing provisioning with
+`CofferAnisetteProvider::open_existing`. Missing/corrupt/incompatible state
+stops the run before an Apple request; no slot, identifier, or initial
+provisioning state is created. Normal OTP generation can stage and publish
+updates to existing local anisette state.
+
+One explicit `Service::XcodeAuthentication` request follows confirmation.
+There are no passwords, 2FA, downloads, provisioning, keyring writes/deletes,
+service iteration, or automatic retries. HTTP/session rejection or an expired
+issued token ends the run and preserves the stored session. Successful output
+states only that one authenticated, unexpired Xcode token was obtained; the
+token is immediately dropped and never printed or stored.
+
+The initial decoder supports strict XML plaintext only. Binary plist is
+explicitly unsupported. Offline vectors do not establish current Apple
+compatibility, GSA session lifetime, CloudKit access, or token rotation rules.
+See [the protocol scope](../../crates/coffer-protocol/SERVICE_TOKENS.md).

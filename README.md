@@ -132,6 +132,7 @@ Coffer currently provides developer-facing foundations for:
  -  Runtime acquisition and sandboxed use of the required Apple support
     libraries.
  -  Persistence of reusable authentication material in Linux Secret Service.
+ -  An offline-tested, explicit Xcode token exchange using that stored material.
 
 The remaining planned capabilities include:
 
@@ -162,7 +163,7 @@ platform storage, and developer tooling:
 Coffer
 │
 ├── coffer-protocol
-│   └── GSA/SRP authentication and trusted-device 2FA
+│   └── GSA/SRP authentication, trusted-device 2FA, and explicit Xcode token issuance
 ├── coffer-bootstrap
 │   └── bounded, atomic acquisition of Apple support libraries
 ├── coffer-anisette
@@ -231,6 +232,14 @@ tests, `mise run ci`, and GitHub Actions because it contacts Apple and may
 consume authentication and 2FA attempts. See
 [*tools/coffer-live-auth/README.md*](./tools/coffer-live-auth/README.md) before
 running it.
+
+A separate `mise run test-live-token` developer harness uses existing stored
+GSA material for one explicitly confirmed Xcode authentication token request.
+It requires existing libraries/provisioning/session state and does not log in
+or write to Secret Service. This path has offline evidence only; it does not
+provide CloudKit access. See
+[*SERVICE\_TOKENS.md*](./crates/coffer-protocol/SERVICE_TOKENS.md) for scope and
+remaining interoperability questions.
 
 The Rust toolchain, including `rustfmt`, Clippy, and rust-analyzer, is pinned in
 *mise.toml*. The repository treats Rust and Clippy warnings as errors.

@@ -152,7 +152,7 @@ fn header(name: &str, value: &str) -> (String, Zeroizing<String>) {
 }
 
 /// Headers shared by the two GSA password-exchange requests.
-fn gsa_headers(anisette: &AnisetteData) -> Vec<(String, Zeroizing<String>)> {
+pub(crate) fn gsa_headers(anisette: &AnisetteData) -> Vec<(String, Zeroizing<String>)> {
     vec![
         header("Content-Type", PLIST_CONTENT_TYPE),
         header("Accept", "*/*"),

@@ -103,13 +103,25 @@ impl fmt::Debug for Request {
 /// length only, because bodies contain session material.
 pub struct Response {
     status: u16,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 impl Response {
     /// Creates a response from its status code and body.
     #[must_use]
     pub fn new(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body: Zeroizing::new(body),
+        }
+    }
+
+    /// Takes an already-zeroizing body without copying or reallocating it.
+    ///
+    /// This lets bounded transports preserve cleanup across both successful
+    /// reads and read failures. Every response body is wiped on drop.
+    #[must_use]
+    pub fn from_zeroizing(status: u16, body: Zeroizing<Vec<u8>>) -> Self {
         Self { status, body }
     }
 

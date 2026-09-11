@@ -106,6 +106,8 @@ pub enum SlotStateError {
     FileMode,
     /// The state file exists but does not have the exact version-1 shape.
     Corrupt,
+    /// Existing profile state is absent; load-only mode never creates it.
+    Missing,
     /// The random source failed.
     Entropy,
     /// A filesystem operation failed for another reason.
@@ -123,6 +125,7 @@ impl SlotStateError {
             Self::FileNotPlain => "profile slot file is not a regular file",
             Self::FileMode => "profile slot file is not mode 0600",
             Self::Corrupt => "profile slot file is corrupt; it is not replaced automatically",
+            Self::Missing => "existing profile state is missing",
             Self::Entropy => "profile slot could not be generated",
             Self::Io => "profile slot state I/O failed",
         }
@@ -185,6 +188,30 @@ impl SlotState {
         Self {
             state_home: state_home.to_path_buf(),
         }
+    }
+
+    /// Loads an existing slot without creating directories or drawing entropy.
+    ///
+    /// # Errors
+    /// Returns [`SlotStateError::Missing`] when any component is absent, or the
+    /// same path/mode/format errors as `load_or_create`. Nothing is repaired.
+    pub fn load(&self) -> Result<SessionSlot, SlotStateError> {
+        let base = openat(
+            CWD,
+            &self.state_home,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| {
+            if e == Errno::NOENT {
+                SlotStateError::Missing
+            } else {
+                SlotStateError::Io
+            }
+        })?;
+        let application = open_plain_directory(&base, APPLICATION_DIRECTORY)?;
+        let directory = open_plain_directory(&application, HARNESS_DIRECTORY)?;
+        load_existing(&directory)?.ok_or(SlotStateError::Missing)
     }
 
     /// Returns the existing slot or creates one.
@@ -254,6 +281,10 @@ fn create_and_open_plain_directory(
         Ok(()) | Err(Errno::EXIST) => {}
         Err(_) => return Err(SlotStateError::Io),
     }
+    open_plain_directory(parent, name)
+}
+
+fn open_plain_directory(parent: &OwnedFd, name: &str) -> Result<OwnedFd, SlotStateError> {
     let directory = openat(
         parent,
         name,
@@ -262,6 +293,7 @@ fn create_and_open_plain_directory(
     )
     .map_err(|error| match error {
         Errno::LOOP | Errno::NOTDIR => SlotStateError::DirectoryNotPlain,
+        Errno::NOENT => SlotStateError::Missing,
         _ => SlotStateError::Io,
     })?;
     let stat = fstat(&directory).map_err(|_| SlotStateError::Io)?;

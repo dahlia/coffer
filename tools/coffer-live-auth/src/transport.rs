@@ -24,9 +24,9 @@
 //!   against an allowlist before any connection is opened, so a bug elsewhere
 //!   cannot turn this transport into a general HTTP client.
 //! - One call is one HTTP exchange.  There is no retry, no redirect following,
-//!   no proxy, and no response to an authentication challenge: a `3xx`, `401`,
-//!   or `407` status is reported as a transport failure without reading its
-//!   body, and every other status is handed to the protocol layer as is.
+//!   no proxy, and no response to an authentication challenge. A `3xx` or
+//!   `407` status is a transport failure; `401` is returned to the protocol
+//!   without reading its body or answering the challenge.
 //! - TLS uses rustls with Apple's published “Apple Inc. Root” as the only
 //!   trust anchor.  This policy is private to the fixed GSA endpoints; the
 //!   Apple CDN transport continues to use the public WebPKI.
@@ -40,6 +40,7 @@
 use core::fmt;
 use std::io::Read;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 use coffer_protocol::auth::{GSA_ENDPOINT, TRUSTED_DEVICE_ENDPOINT, VALIDATE_ENDPOINT};
 use coffer_protocol::transport::{Method, Request, Response, Transport, TransportError};
@@ -224,7 +225,7 @@ impl<X: Exchange> GsaTransport<X> {
 fn classify_status(status: u16) -> Result<(), TransportError> {
     let detail = match status {
         300..=399 => "redirect refused",
-        401 | 407 => "authentication challenge refused",
+        407 => "authentication challenge refused",
         _ => return Ok(()),
     };
     Err(TransportError::Other {
@@ -291,6 +292,9 @@ impl Default for UreqExchange {
 
 impl Exchange for UreqExchange {
     fn exchange(&self, request: &Request, timeout: Duration) -> Result<Response, TransportError> {
+        // Exchange is public too: direct calls must satisfy the same endpoint
+        // policy and allocation ceiling before HTTP construction or reading.
+        validate_request(request)?;
         let limit = request.max_response_body;
         let response = match request.method {
             Method::Post => {
@@ -325,23 +329,31 @@ impl Exchange for UreqExchange {
         }
         .map_err(|error| classify_ureq_error(&error, limit))?;
         let status = response.status().as_u16();
-        if classify_status(status).is_err() {
+        if status == 401 || classify_status(status).is_err() {
             // Do not read a body the transport is about to refuse.
             return Ok(Response::new(status, Vec::new()));
         }
-        let mut body = Vec::with_capacity(limit.min(64 * 1024));
-        response
-            .into_body()
-            .into_reader()
-            .take(limit as u64 + 1)
-            .read_to_end(&mut body)
-            .map_err(|_| TransportError::Other {
-                detail: "response body read failed".to_owned(),
-            })?;
-        if body.len() > limit {
-            return Err(TransportError::ResponseTooLarge { limit });
+        // Allocate the bound once before it contains secrets; never grow or
+        // leave an ordinary read scratch buffer behind on failure.
+        let mut body = Zeroizing::new(vec![0; limit + 1]);
+        let mut reader = response.into_body().into_reader();
+        let mut used = 0;
+        loop {
+            let read = reader
+                .read(&mut body[used..])
+                .map_err(|_| TransportError::Other {
+                    detail: "response body read failed".to_owned(),
+                })?;
+            if read == 0 {
+                break;
+            }
+            used += read;
+            if used > limit {
+                return Err(TransportError::ResponseTooLarge { limit });
+            }
         }
-        Ok(Response::new(status, body))
+        body.truncate(used);
+        Ok(Response::from_zeroizing(status, body))
     }
 }
 
@@ -601,7 +613,7 @@ pub(crate) mod tests {
 
     #[test]
     fn redirects_and_authentication_challenges_are_refused() {
-        for status in [301, 302, 303, 307, 308, 401, 407] {
+        for status in [301, 302, 303, 307, 308, 407] {
             let exchange = FakeExchange::new(vec![Ok((status, b"Location: elsewhere".to_vec()))]);
             let transport = GsaTransport::new(exchange, deadlines());
             let error = futures_lite::future::block_on(transport.send(post_request())).unwrap_err();
@@ -609,6 +621,15 @@ pub(crate) mod tests {
             assert!(text == "redirect refused" || text == "authentication challenge refused");
             assert!(!text.contains("elsewhere"));
         }
+    }
+
+    #[test]
+    fn unauthorized_status_is_returned_without_another_exchange() {
+        let transport =
+            GsaTransport::new(FakeExchange::new(vec![Ok((401, Vec::new()))]), deadlines());
+        let response = futures_lite::future::block_on(transport.send(post_request())).unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(transport.exchange.calls(), 1);
     }
 
     #[test]

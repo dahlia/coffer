@@ -19,19 +19,25 @@ workspace = true
 [dependencies]
 # AES-256-CBC with PKCS#7 padding decrypts the server-provided data `spd`.
 aes = "0.9.3"
+# Apptokens uses AES-256-GCM with its protocol-specific 16-byte nonce.
+# Enable key-schedule zeroization; no randomness or allocating AEAD helpers.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
 cbc = { version = "0.2.1", default-features = false, features = ["alloc", "block-padding"] }
 # `X-Apple-Identity-Token` is base64.  The version matches the one `plist`
 # already depends on so that the graph carries a single copy.
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 # SHA-256, HMAC-SHA256, and PBKDF2-HMAC-SHA256 for the `s2k` password key,
-# the `spd` key derivation, and the SRP hash.
-hmac = "0.13.0"
+# the `spd` key derivation, and the SRP hash.  Zeroize their key-derived
+# state after the stored-session apptokens checksum is finalized.
+hmac = { version = "0.13.0", features = ["zeroize"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
-sha2 = "0.11.0"
+sha2 = { version = "0.11.0", features = ["zeroize"] }
 # GSA speaks XML property lists.  The `serde` feature is unnecessary: requests
 # are built and responses are read through `plist::Value` with explicit
 # bounds checks.
 plist = { version = "1.10.0", default-features = false }
+# Validate token response structure and duplicate fields before extraction.
+quick-xml = { version = "0.41.0", default-features = false }
 # SRP-6a arithmetic.  0.7 is the first release whose client supports Apple's
 # variant (`username_in_x = false`, padded `u`, `K = H(S)`, RFC 5054 `M1`) and
 # is built on constant-time `crypto-bigint`; it is still a release candidate,

@@ -143,6 +143,26 @@ impl ReusableSession {
         }
     }
 
+    /// Borrows and validates the stored fields for one explicit service-token request.
+    ///
+    /// The view never reconstructs an authenticated `Session`, requires no
+    /// account name, and cannot outlive this zeroizing owner. COFFSESS v1 is unchanged.
+    ///
+    /// # Errors
+    /// Returns `TokenError::InvalidSession` for fields that cannot safely be
+    /// serialized into the token request, before anisette or network work.
+    pub fn token_input(
+        &self,
+    ) -> Result<coffer_protocol::tokens::SessionMaterialRef<'_>, coffer_protocol::tokens::TokenError>
+    {
+        coffer_protocol::tokens::SessionMaterialRef::new(
+            &self.account_id,
+            &self.idms_token,
+            self.session_key.as_slice(),
+            &self.cookie,
+        )
+    }
+
     /// Exposes the account ID for construction of a GSA token request.
     #[must_use]
     pub fn expose_account_id(&self) -> &str {
