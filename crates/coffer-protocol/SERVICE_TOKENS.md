@@ -47,13 +47,17 @@ The fixed endpoint is `POST https://gsa.apple.com/grandslam/GsService2`.
 The checksum is `HMAC-SHA256(sk, "apptokens" || adsid || service)` without
 separators. The request contains an `app` array with one service string,
 data-valued `c` and `checksum`, string `o`, `t`, `u`, and the existing Coffer
-`cpd`/HTTP profile. Coffer retains its string-valued compatibility flags; xtool
-uses booleans. Current Apple acceptance of this difference for `apptokens` is
-unverified.
+HTTP profile. The token-specific `cpd` encodes `bootstrap`, `icscrec`, and
+`prkgen` as true Booleans and `pbe` as false, matching xtool's pinned
+[operation request]. Other `cpd` entries remain strings. M1 retains its
+independently verified request representation: it sends these flags as strings
+to the same endpoint and authenticated successfully. Boolean typing is not
+established as required by that endpoint or as the cause of token rejection.
 
-The request uses compact XML without the canonical DOCTYPE or indentation
-used by M1 GSA and anisette provisioning requests. Apple acceptance of this
-request serialization is unverified.
+The request uses the canonical Apple plist prologue used by M1, with compact
+interior XML. These representation choices align with documented/evidenced
+serialization; neither proves that the earlier compact/string-flag request
+caused HTTP 404. The fixed endpoint and client-info remain unchanged.
 
 HTTP 200 is insufficient: `Response.Status.ec` must be integer zero and an
 `au` selector stops the attempt. HTTP 401 is a rejection without challenge
@@ -92,9 +96,18 @@ quick-xml's internal tag stack/errors from holding remote values. HMAC/SHA/AES
 state uses dependency zeroization features. This does not promise to erase
 copies inside external HTTP/TLS/D-Bus libraries or operating-system buffers.
 
+[operation request]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Requests/GrandSlamOperationRequest.swift
+
 
 Evidence and unknowns
 ---------------------
+
+On 12 September 2026, two explicitly authorized stored-session Xcode
+`apptokens` attempts with the prior string-flag/compact representation ended
+in HTTP errors. The second returned HTTP 404; the first numeric status was
+not retained. No token was verified, and neither execution automatically
+retried or started a new login. These observations do not identify the cause
+or verify the revised request representation.
 
 Protocol facts were independently implemented from SideStore's MPL-2.0
 [request source] at `03beb1aa42991ccdad6214dee77e72282bef461f` and xtool's MIT

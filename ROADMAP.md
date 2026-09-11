@@ -110,8 +110,9 @@ provider or fallback.
 That live validation proved persistence and reload of the reusable GSA session
 material, not an authenticated network session resumed from it. A subsequent
 offline-tested Phase 1 implements an explicit `apptokens` request for the Xcode
-authentication service using stored GSA material. That path has not been
-exercised against Apple and does not establish CloudKit access. CloudKit
+authentication service using stored GSA material. Live checks on 12 September
+2026 reached HTTP errors, including HTTP 404; successful token issuance and
+CloudKit access remain unverified. CloudKit
 configuration and service tokens remain Milestone 2 work, and long-lived
 automatic session renewal remains Milestone 6 work.
 

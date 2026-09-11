@@ -32,6 +32,13 @@ standard-library `hmac.new(bytes(range(32)), message, hashlib.sha256)`, where
 The cookie is `00 ff 80 01`, exercising binary rather than string encoding.
 The test separately checks RFC 4231 test case 1 for the HMAC primitive.
 
+On 12 September 2026, the synthetic request was deliberately updated to use
+Boolean `bootstrap`, `icscrec`, `pbe`, and `prkgen`, matching the pinned xtool
+[operation request]. Its canonical plist prologue now matches M1 and Apple's
+[XML example]. Python `plistlib` verified that only those four field types
+changed; the HMAC/cookie/service and all response fixtures are unchanged.
+This alignment does not prove the cause of the observed HTTP 404.
+
 The protocol facts come from [SideStore's MPL-2.0 request implementation] at
 `03beb1aa42991ccdad6214dee77e72282bef461f` and xtool's MIT [AEAD composition]
 and [token schema] at `4208c77c8128568f8b938d0c67d2f4bdcf04e100`.
@@ -43,10 +50,12 @@ SHA-256 checksums (no trailing newline in XML files):
  -  *plaintext.plist*:
     `f51d3a0eb8b02e83e7f1d6ab56a47c2d2b1b76eb3fe990c38c95a5cae4505a97`
  -  *request.plist*:
-    `3dc14a63fee9be6c47d56b79af35fbef6bb3402d8b078c4e0a06b86342111b1f`
+    `e8b895a340e4bfb78db83d0a2a8a3593dd3703d0aa9d35888294129b00cc80b7`
  -  *response.plist*:
     `070add35dbcfc7ceb9c3dbd69f7bd45eae576201892480031cac643fa79277f5`
 
+[operation request]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Requests/GrandSlamOperationRequest.swift
+[XML example]: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/WorkwithPropertyListFiles.html
 [SideStore's MPL-2.0 request implementation]: https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/icloud-auth/src/client.rs
 [AEAD composition]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Crypto/AppTokens.swift
 [token schema]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Operations/GrandSlamFetchAppTokensOperation.swift

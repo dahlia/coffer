@@ -66,6 +66,12 @@ impl Writer {
         self.text(value)?;
         self.raw(b"</string>")
     }
+    fn boolean(&mut self, key: &str, value: bool) -> Result<(), Error> {
+        self.raw(b"<key>")?;
+        self.text(key)?;
+        self.raw(b"</key>")?;
+        self.raw(if value { b"<true/>" } else { b"<false/>" })
+    }
     fn data(&mut self, key: &str, value: &[u8]) -> Result<(), Error> {
         self.raw(b"<key>")?;
         self.text(key)?;
@@ -84,6 +90,10 @@ pub(super) fn request(
     service: Service,
     anisette: &AnisetteData,
 ) -> Result<Request, Error> {
+    enum CpdValue<'a> {
+        String(&'a str),
+        Boolean(bool),
+    }
     let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(session.key)
         .map_err(|_| Error::InvalidSession)?;
     mac.update(b"apptokens");
@@ -94,28 +104,33 @@ pub(super) fn request(
     // Input bounds establish an upper bound below MAX_BODY; raw() also checks
     // every append so the secret-bearing allocation can never grow.
     let result = (|| {
-        writer.raw(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Header</key><dict><key>Version</key><string>1.0.1</string></dict><key>Request</key><dict><key>app</key><array><string>")?;
+        writer.raw(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict><key>Header</key><dict><key>Version</key><string>1.0.1</string></dict><key>Request</key><dict><key>app</key><array><string>")?;
         writer.text(service.identifier())?;
         writer.raw(b"</string></array>")?;
         writer.data("c", session.cookie)?;
         writer.data("checksum", &checksum.0)?;
         writer.raw(b"<key>cpd</key><dict>")?;
-        let mut cpd: Vec<(&str, &str)> = anisette
+        let mut cpd: Vec<(&str, CpdValue<'_>)> = anisette
             .entries()
             .into_iter()
             .filter(|(k, _)| *k != crate::anisette::CLIENT_INFO_HEADER)
+            .map(|(key, value)| (key, CpdValue::String(value)))
             .collect();
+        // Token-only Boolean profile; auth::gsa intentionally retains M1 strings.
         cpd.extend([
-            ("bootstrap", "true"),
-            ("icscrec", "true"),
-            ("loc", anisette.locale.as_str()),
-            ("pbe", "false"),
-            ("prkgen", "true"),
-            ("svct", "iCloud"),
+            ("bootstrap", CpdValue::Boolean(true)),
+            ("icscrec", CpdValue::Boolean(true)),
+            ("loc", CpdValue::String(anisette.locale.as_str())),
+            ("pbe", CpdValue::Boolean(false)),
+            ("prkgen", CpdValue::Boolean(true)),
+            ("svct", CpdValue::String("iCloud")),
         ]);
         cpd.sort_unstable_by_key(|(key, _)| *key);
         for (key, value) in cpd {
-            writer.string(key, value)?;
+            match value {
+                CpdValue::String(value) => writer.string(key, value)?,
+                CpdValue::Boolean(value) => writer.boolean(key, value)?,
+            }
         }
         writer.raw(b"</dict>")?;
         writer.string("o", "apptokens")?;

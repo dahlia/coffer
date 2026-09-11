@@ -54,6 +54,48 @@ fn independent_openssl_token_from_stored_fields() {
 }
 
 #[test]
+fn request_uses_typed_capabilities_and_canonical_plist_prologue() {
+    let transport = ScriptedTransport::new(vec![ok(fixture("apptokens/response.plist"))]);
+    let key = key();
+    let input =
+        SessionMaterialRef::new("SYNTHETIC-ADSID", "SYNTHETIC-IDMS", &key, &[0, 255, 128, 1])
+            .unwrap();
+    block_on(TokenClient::new(&transport, &FixedAnisette).issue(
+        input,
+        Service::XcodeAuthentication,
+        &|| EpochMillis::new(1),
+    ))
+    .unwrap();
+    assert_eq!(transport.count(), 1);
+    let requests = transport.requests();
+    let body = requests[0].body.as_ref().unwrap();
+    // Independent plist decoding is used only on synthetic test data.
+    let root = plist::Value::from_reader_xml(body.as_slice()).unwrap();
+    let request = root.as_dictionary().unwrap()["Request"]
+        .as_dictionary()
+        .unwrap();
+    let cpd = request["cpd"].as_dictionary().unwrap();
+    for (name, value) in [
+        ("bootstrap", true),
+        ("icscrec", true),
+        ("pbe", false),
+        ("prkgen", true),
+    ] {
+        assert_eq!(cpd[name].as_boolean(), Some(value));
+    }
+    assert_eq!(cpd["svct"].as_string(), Some("iCloud"));
+    assert_eq!(request["c"].as_data(), Some(&[0, 255, 128, 1][..]));
+    let m1 = fixture("gsa/init_request.plist");
+    let prefix = m1
+        .split_inclusive(|b| *b == b'\n')
+        .take(3)
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(body.starts_with(&prefix));
+}
+
+#[test]
 fn expiry_boundary_does_not_retry() {
     let transport = ScriptedTransport::new(vec![ok(fixture("apptokens/response.plist"))]);
     let key: [u8; 32] = core::array::from_fn(|i| i as u8);

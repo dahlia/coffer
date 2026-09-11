@@ -236,8 +236,8 @@ running it.
 A separate `mise run test-live-token` developer harness uses existing stored
 GSA material for one explicitly confirmed Xcode authentication token request.
 It requires existing libraries/provisioning/session state and does not log in
-or write to Secret Service. This path has offline evidence only; it does not
-provide CloudKit access. See
+or write to Secret Service. Successful token issuance remains unverified
+against Apple, and this path does not provide CloudKit access. See
 [*SERVICE\_TOKENS.md*](./crates/coffer-protocol/SERVICE_TOKENS.md) for scope and
 remaining interoperability questions.
 
