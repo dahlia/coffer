@@ -3,8 +3,9 @@ Service tokens from stored GSA material
 
 Phase 1 implements one explicit `apptokens` exchange for
 `com.apple.gs.xcode.auth`. This is Xcode authentication, not CloudKit access.
-The implementation has deterministic offline evidence; Apple interoperability
-and the effect of issuance on existing tokens remain unverified.
+The implementation has deterministic offline evidence and one successful live
+stored-session token issuance on 12 September 2026. Session lifetime and the
+effect of issuance on existing tokens remain unverified.
 
 
 The twelve scope decisions
@@ -135,8 +136,9 @@ joining remains unproven, including caller authorization and cryptography.
 CloudKit service IDs/configuration, native RPC schemas/framing/compression,
 Octagon/escrow cryptography and mutation effects, CKKS interoperability, GSA
 session lifetime/error mappings, and token rotation/invalidation are deferred.
-Synthetic vectors establish this implementation's contract, not a successful
-Apple request. The roadmap's M2 checkboxes remain open.
+Synthetic vectors alone establish this implementation's contract; the live
+result is recorded under “Successful stored-session issuance” below. The
+roadmap's M2 checkboxes remain open.
 
 [request source]: https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/icloud-auth/src/client.rs
 [AEAD framing]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Crypto/AppTokens.swift
@@ -153,7 +155,8 @@ process then made one Xcode token request and stopped with the former generic
 malformed-response error. The current control flow establishes HTTP 200 for
 that failure, but does not establish which parser check failed, successful
 AEAD verification, or token issuance. No response was retained and no retry
-occurred. The new fixed-stage diagnostics have synthetic evidence only.
+occurred. Later requests used fixed-stage diagnostics to narrow the failure
+before the successful issuance recorded below.
 
 
 Plist failure categories
@@ -190,3 +193,22 @@ cryptographic framing remain unchanged. The bare fixture is independently
 synthetic and contains the same invented token as the existing wrapped fixture.
 
 [Apple's published parser]: https://github.com/apple-oss-distributions/CF/blob/dc54c6bb1c1e5e0b9486c1d26dd5bef110b20bf3/CFPropertyList.c
+
+
+Successful stored-session issuance
+----------------------------------
+
+On 12 September 2026, after the authenticated bare-dictionary change passed
+deterministic tests, independent correctness/security reviews and full CI, a
+separate developer-harness process loaded the saved GSA material and obtained
+an authenticated, unexpired Xcode token. It printed only a fixed success result
+and discarded the token without storing it. No password, OTP, fresh login,
+trust mutation, recovery attempt or keychain write was part of that request.
+
+This was the eighth token request in the M2 investigation, with zero automatic
+retries. Earlier failures ended their respective attempts; offline
+investigation, review and CI preceded each changed request. The successful
+result establishes interoperability for this account and service, not a
+lifetime/rotation contract or native CloudKit authorization. No real response
+was retained as a fixture, and no M2 roadmap checkbox is completed by this
+result alone.
