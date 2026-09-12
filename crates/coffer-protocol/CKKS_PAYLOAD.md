@@ -5,6 +5,9 @@ Offline CKKS payload decryption
 envelope with an already
 selected 64-byte AES-256-SIV key. It performs no I/O. Its result is an opaque
 plaintext buffer, not a website credential or a validated keychain record.
+The separate [plaintext view](CKKS_PLAINTEXT.md) can explicitly interpret a
+restricted CKKS dictionary while borrowing this buffer. Decryption never
+automatically parses it or follows another key/record after failure.
 The returned `PayloadPlaintext::expose_secret` explicitly borrows the bytes.
 The caller remains responsible for key/account/record binding, authenticated
 metadata construction, freshness and authorization.

@@ -175,8 +175,12 @@ establish anchor trust, prove collection completeness, retrieve records,
 decrypt credential items, or establish live CKKS interoperability. The items
 below remain incomplete. A separate bounded offline payload primitive decrypts
 one nonce/tag/ciphertext envelope with a caller-selected key and ordered AD,
-using independent synthetic fixtures. It returns opaque bytes; website record
-parsing, metadata sidecars and live compatibility remain unverified.
+using independent synthetic fixtures. It returns opaque bytes. An explicit
+borrowed plaintext parser supports a bounded flat binary-plist subset and a
+narrow Internet password candidate with an integer-zero tombstone field.
+Independent synthetic fixtures cover this local subset; complete website
+record coverage, metadata sidecars, the account-to-credential path and live
+compatibility remain unverified.
 
  -  [ ] Retrieve CKKS zones and record changes.
  -  [ ] Recover the top-level key hierarchy.

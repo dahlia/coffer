@@ -167,7 +167,10 @@ hierarchy-recovery or credential-decryption roadmap items.
 A separate [offline payload primitive](CKKS_PAYLOAD.md) accepts an already
 selected item key and ordered serialized AD. It returns authenticated opaque
 bytes, not parsed credentials, and does not supply the missing key/record
-adapter or establish graph trust.
+adapter or establish graph trust. A separate [plaintext view](CKKS_PLAINTEXT.md)
+explicitly interprets a restricted binary-plist dictionary borrowed from that
+payload owner. Its narrow Internet password projection requires an explicit
+non-tombstone value; it does not provide the missing remote record adapter.
 
 [constants]: https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSConstants.m
 [key]: https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSKey.m

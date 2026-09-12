@@ -39,6 +39,9 @@ pub mod hierarchy;
 /// Bounded offline payload decryption with caller-ordered associated data.
 pub mod payload;
 
+/// Explicit bounded binary-plist views of borrowed offline plaintext.
+pub mod plaintext;
+
 use aes_siv::{KeyInit, Tag, siv::Aes256Siv};
 use core::fmt;
 use zeroize::Zeroizing;
