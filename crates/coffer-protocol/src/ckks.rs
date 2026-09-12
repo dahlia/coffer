@@ -14,14 +14,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Offline CKKS key unwrapping and bounded graphs. No retrieval or trust/recovery operations.
+//! Offline CKKS key unwrapping, bounded graphs and payload decryption.
+//! No retrieval or trust/recovery operations.
 //!
-//! This primitive authenticates wrapped key bytes, not record identity or trust.
+//! Key unwrapping authenticates wrapped bytes, not record identity or trust.
 //! The caller must authenticate account/zone/key-class/parent bindings separately.
 //! [`hierarchy`] checks supplied metadata for structural consistency only.
 //! In particular, successfully unwrapping a self-wrapped key does not establish
 //! a trusted root. Supply root keys only from an independently verified source.
-//! Item ciphertext has a different envelope and is not accepted here.
+//! Item ciphertext has a different envelope, handled only by [`payload`].
 //!
 //! The format is based on protocol facts in Apple's `CKKSSIV.m` at Security
 //! revision `db15acbe6a7f257a859ad9a3bb86097bfe0679d9`, composed using RFC 5297.
@@ -34,6 +35,9 @@
 
 /// Bounded, offline validation and selected-path key unwrapping.
 pub mod hierarchy;
+
+/// Bounded offline payload decryption with caller-ordered associated data.
+pub mod payload;
 
 use aes_siv::{KeyInit, Tag, siv::Aes256Siv};
 use core::fmt;

@@ -157,12 +157,17 @@ inputs, full scope isolation, duplicate records, cycles, all limits, anchor
 mismatch, every corrupted ciphertext byte and immediate failure without partial
 output. Separate tests show that metadata rebinding can still decrypt.
 
-This work does not implement a CloudKit/CKCode decoder, record retrieval,
-current-key pointer semantics, item decryption, trust acquisition, multiple
-anchors, revocation, or rollback protection. The vectors verify the chosen
-composition and local graph policy; Apple corecrypto and live CKKS
+This graph component does not implement a CloudKit/CKCode decoder, record
+retrieval, current-key pointer semantics, item decryption, trust acquisition,
+multiple anchors, revocation, or rollback protection. The vectors verify the
+chosen composition and local graph policy; Apple corecrypto and live CKKS
 interoperability remain unverified. This subset does not complete the M2
 hierarchy-recovery or credential-decryption roadmap items.
+
+A separate [offline payload primitive](CKKS_PAYLOAD.md) accepts an already
+selected item key and ordered serialized AD. It returns authenticated opaque
+bytes, not parsed credentials, and does not supply the missing key/record
+adapter or establish graph trust.
 
 [constants]: https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSConstants.m
 [key]: https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSKey.m

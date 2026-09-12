@@ -173,7 +173,10 @@ are implemented with independent synthetic vectors. A caller-supplied anchor
 can unwrap one selected class-key path. This does not authenticate metadata,
 establish anchor trust, prove collection completeness, retrieve records,
 decrypt credential items, or establish live CKKS interoperability. The items
-below remain incomplete.
+below remain incomplete. A separate bounded offline payload primitive decrypts
+one nonce/tag/ciphertext envelope with a caller-selected key and ordered AD,
+using independent synthetic fixtures. It returns opaque bytes; website record
+parsing, metadata sidecars and live compatibility remain unverified.
 
  -  [ ] Retrieve CKKS zones and record changes.
  -  [ ] Recover the top-level key hierarchy.
