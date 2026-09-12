@@ -63,7 +63,7 @@ const FINAL_HASHES: [(&str, &str); 4] = [
 
 const PATCH_SHA256: &str = "e27436272e0dcb99255d1da7c00934ab50e1f33990ae62a504fbf20f73d62857";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const LOCAL_CLOSURE_PACKAGES: [&str; 22] = [
+const LOCAL_CLOSURE_PACKAGES: [&str; 23] = [
     "base64",
     "block-buffer",
     "cfg-if",
@@ -78,6 +78,9 @@ const LOCAL_CLOSURE_PACKAGES: [&str; 22] = [
     "omnisette-local",
     "proc-macro2",
     "quote",
+    // aes-siv -> aead defaults enable crypto-common/rand_core workspace-wide.
+    // Reviewed rand_core 0.10.1 contains traits only, no OS/network backend.
+    "rand_core",
     "sha2",
     "syn",
     "thiserror",
@@ -741,6 +744,21 @@ mod tests {
     #[test]
     fn metadata_accepts_the_reviewed_minimal_graph() {
         assert_eq!(verify_graph(&metadata_without_dependency()), Ok(()));
+    }
+
+    #[test]
+    fn metadata_accepts_rand_core_traits_but_not_entropy_backends() {
+        let mut metadata = metadata_with_dependency("rand_core", None);
+        *metadata.pointer_mut("/packages/2/source").unwrap() =
+            Value::String(CRATES_IO_SOURCE.to_owned());
+        assert_eq!(verify_graph(&metadata), Ok(()));
+        *metadata.pointer_mut("/packages/2/name").unwrap() = Value::String("getrandom".to_owned());
+        assert_eq!(
+            verify_graph(&metadata),
+            Err(CheckError(
+                "an unreviewed package entered the omnisette-local closure"
+            ))
+        );
     }
 
     #[test]

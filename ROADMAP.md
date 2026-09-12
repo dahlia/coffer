@@ -160,6 +160,11 @@ may consume a finite server-side attempt budget.
 
 ### CKKS
 
+An offline AES-SIV key-unwrapping primitive is implemented with independent
+synthetic vectors. This does not validate a key hierarchy, recover a trusted
+root, decrypt credential records, or establish live CKKS interoperability.
+The items below remain incomplete.
+
  -  [ ] Retrieve CKKS zones and record changes.
  -  [ ] Recover the top-level key hierarchy.
  -  [ ] Decrypt class keys and item keys.

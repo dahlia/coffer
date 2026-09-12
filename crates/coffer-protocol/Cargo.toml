@@ -18,7 +18,7 @@ workspace = true
 # not use: randomness and I/O are injected by the caller.
 [dependencies]
 # AES-256-CBC with PKCS#7 padding decrypts the server-provided data `spd`.
-aes = "0.9.3"
+aes = { version = "0.9.3", features = ["zeroize"] }
 # Apptokens uses AES-256-GCM with its protocol-specific 16-byte nonce.
 # Enable key-schedule zeroization; no randomness or allocating AEAD helpers.
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
@@ -47,6 +47,11 @@ quick-xml = { version = "0.41.0", default-features = false }
 srp = { version = "=0.7.0-rc.3", default-features = false }
 # Passwords, codes, keys, and tokens are wiped on drop.
 zeroize = "1.9.0"
+# CKKS key wrapping uses deterministic SIV with no nonce/AD components.
+# Disable allocation/randomness; wipe the SIV encryption key on drop.
+aes-siv = { version = "0.8.0", default-features = false, features = ["zeroize"] }
+# Enable wiping of the MAC state used internally by aes-siv.
+cmac = { version = "0.8.0", default-features = false, features = ["zeroize"] }
 
 [dev-dependencies]
 # Validate that the embedded Apple root is a parseable trust anchor.  This is
