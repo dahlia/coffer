@@ -54,6 +54,17 @@ SHA-256 checksums (no trailing newline in XML files):
  -  *response.plist*:
     `070add35dbcfc7ceb9c3dbd69f7bd45eae576201892480031cac643fa79277f5`
 
+`plaintext-bare.plist` is derived from the invented `plaintext.plist` by
+removing its XML declaration and plist wrapper. It contains no observed Apple
+bytes. It tests the independently evidenced bare dictionary grammar after
+authenticated decryption; it is not an Apple interoperability vector.
+
+SHA-256 of `plaintext-bare.plist`:
+
+~~~~ text
+60152c81d64e511ea3dc82d7859d1c05a9d9d1cb7def1f0f93dd4db755088f9d
+~~~~
+
 [operation request]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Requests/GrandSlamOperationRequest.swift
 [XML example]: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/WorkwithPropertyListFiles.html
 [SideStore's MPL-2.0 request implementation]: https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/icloud-auth/src/client.rs

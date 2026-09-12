@@ -84,13 +84,15 @@ must contain exactly the requested service with string `token` and integer
 `expiry`. Account binding derives from the input/key; there is no independently
 evidenced account field in this response.
 
-The token parser accepts one XML 1.0 UTF-8 plist dictionary. It accepts the
-canonical Apple public plist DOCTYPE as inert syntax, never resolves it, and
-rejects internal subsets, arbitrary DTDs, comments, CDATA, namespaces,
-attributes other than the canonical plist version, and trailing documents.
-Standard/numeric character references are decoded before duplicate comparison.
-Every dictionary rejects duplicates, including unknown keys. Scalar/collection
-structure and scalar types are checked before required fields are selected.
+The outer token parser requires one XML 1.0 UTF-8 plist-wrapped dictionary.
+Authenticated plaintext additionally accepts one bare dictionary root. It
+accepts the canonical Apple public plist DOCTYPE as inert syntax, never
+resolves it, and rejects internal subsets, arbitrary DTDs, comments, CDATA,
+namespaces, attributes other than the canonical plist version, and trailing
+documents. Standard/numeric character references are decoded before duplicate
+comparison. Every dictionary rejects duplicates, including unknown keys.
+Scalar/collection structure and scalar types are checked before required fields
+are selected.
 
 Bounds are 128 KiB per XML body, 64 KiB decoded data, 4 KiB encoded string
 content, 256-byte encoded keys, depth 8, and 512 markup events including end
@@ -167,3 +169,24 @@ and date checks. `MalformedResponse` still describes later schema validation.
 These categories contain no remote text, field name, offset, or excerpt. No
 parser acceptance, size limit, or cryptographic behavior changes. Synthetic
 tests verify classifications on outer and authenticated plaintext failures.
+
+
+Authenticated bare dictionary roots
+-----------------------------------
+
+Apple CoreFoundation at commit `dc54c6bb1c1e5e0b9486c1d26dd5bef110b20bf3`
+accepts a dictionary directly through `parseXMLPropertyList` and
+`parseXMLElement`, as well as a plist wrapper. This is a grammar fact from
+[Apple's published parser], whose APSL-2.0 implementation is not copied,
+translated, or ported here. The pinned xtool token decoder uses Foundation's
+property-list decoder. These facts motivate a narrow compatibility option;
+they do not prove the observed live structural failure had this cause.
+
+Coffer permits this form only for authenticated plaintext, retains the outer
+wrapper requirement, and still requires a single dictionary followed by EOF.
+It does not adopt CoreFoundation's tolerance for trailing content or other
+broader parsing behavior. Bounds, duplicate checks, secret ownership and
+cryptographic framing remain unchanged. The bare fixture is independently
+synthetic and contains the same invented token as the existing wrapped fixture.
+
+[Apple's published parser]: https://github.com/apple-oss-distributions/CF/blob/dc54c6bb1c1e5e0b9486c1d26dd5bef110b20bf3/CFPropertyList.c

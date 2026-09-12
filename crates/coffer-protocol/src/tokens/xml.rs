@@ -428,6 +428,19 @@ impl<'a> Parser<'a> {
 }
 
 pub(super) fn parse_at(bytes: &[u8], stage: ResponseStage) -> Result<Value, Error> {
+    parse_document(bytes, stage, false)
+}
+
+/// Allows a bare dictionary only after the caller authenticated the plaintext.
+pub(super) fn parse_authenticated(bytes: &[u8]) -> Result<Value, Error> {
+    parse_document(bytes, ResponseStage::AuthenticatedPlist, true)
+}
+
+fn parse_document(
+    bytes: &[u8],
+    stage: ResponseStage,
+    allow_bare_dictionary: bool,
+) -> Result<Value, Error> {
     preflight(bytes, stage)?;
     let mut parser = Parser {
         reader: Reader::from_reader(bytes),
@@ -441,17 +454,24 @@ pub(super) fn parse_at(bytes: &[u8], stage: ResponseStage) -> Result<Value, Erro
     if matches!(event, Event::DocType(_)) {
         event = parser.significant()?;
     }
-    if !matches!(&event, Event::Start(s) if s.name().as_ref() == b"plist") {
+    let wrapped = matches!(&event, Event::Start(s) if s.name().as_ref() == b"plist");
+    let root = if wrapped {
+        parser.significant()?
+    } else if allow_bare_dictionary
+        && matches!(&event, Event::Start(s) | Event::Empty(s) if s.name().as_ref() == b"dict")
+    {
+        event
+    } else {
         return Err(malformed(stage, PlistProblem::Structure));
-    }
-    let event = parser.significant()?;
-    let value = parser.value(event, 1)?;
+    };
+    let value = parser.value(root, 1)?;
     value
         .dict()
         .map_err(|_| malformed(stage, PlistProblem::Structure))?;
-    if !matches!(parser.significant()?, Event::End(e) if e.name().as_ref() == b"plist")
-        || !matches!(parser.significant()?, Event::Eof)
-    {
+    if wrapped && !matches!(parser.significant()?, Event::End(e) if e.name().as_ref() == b"plist") {
+        return Err(malformed(stage, PlistProblem::Structure));
+    }
+    if !matches!(parser.significant()?, Event::Eof) {
         return Err(malformed(stage, PlistProblem::Structure));
     }
     Ok(value)

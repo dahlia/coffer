@@ -685,3 +685,49 @@ fn plist_problem_categories_never_retain_remote_material() {
         }
     }
 }
+
+#[test]
+fn authenticated_plaintext_accepts_one_bare_dictionary() {
+    let bare = fixture("apptokens/plaintext-bare.plist");
+    let token = outcome(ok(envelope(&encrypt(&bare))), &key()).unwrap();
+    assert_eq!(token.expose_secret(), "SYNTHETIC-SERVICE-TOKEN");
+}
+
+#[test]
+fn bare_dictionary_keeps_outer_wrapper_and_document_boundaries() {
+    use coffer_protocol::tokens::{PlistProblem, ResponseStage};
+    let bare = String::from_utf8(fixture("apptokens/plaintext-bare.plist")).unwrap();
+    for prefix in ["", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"] {
+        let plaintext = format!("{prefix}\n{bare}\n");
+        assert!(outcome(ok(envelope(&encrypt(plaintext.as_bytes()))), &key()).is_ok());
+    }
+    for n in 0..bare.len() {
+        assert!(
+            outcome(ok(envelope(&encrypt(&bare.as_bytes()[..n]))), &key()).is_err(),
+            "bare truncation {n}"
+        );
+    }
+    let outer = String::from_utf8(fixture("apptokens/response.plist")).unwrap();
+    let outer = outer
+        .replace("<plist version=\"1.0\">", "")
+        .replace("</plist>", "");
+    assert_eq!(
+        failure(outer.into_bytes()),
+        TokenError::MalformedPlist {
+            stage: ResponseStage::OuterPlist,
+            problem: PlistProblem::Structure,
+        }
+    );
+    for plaintext in [
+        format!("{bare}<dict/>"),
+        format!("{bare}SYNTHETIC-TRAILING"),
+        bare.replace("<key>t</key>", "<key>t</key><dict/><key>t</key>"),
+        "<array/>".to_owned(),
+        "<string>SYNTHETIC-SECRET</string>".to_owned(),
+        bare.replace("SYNTHETIC-SERVICE-TOKEN", &"x".repeat(4097)),
+        bare[..bare.len() - 1].to_owned(),
+        "<dict><key>x</key>".repeat(9) + &"</dict>".repeat(9),
+    ] {
+        assert!(outcome(ok(envelope(&encrypt(plaintext.as_bytes()))), &key()).is_err());
+    }
+}

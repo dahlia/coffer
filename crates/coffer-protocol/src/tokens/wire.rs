@@ -192,7 +192,7 @@ pub(super) fn response(
     let plaintext = at(Stage::Envelope, decrypt(envelope, session.key))?;
     let inner = at(
         Stage::AuthenticatedPlist,
-        xml::parse_at(&plaintext, Stage::AuthenticatedPlist),
+        xml::parse_authenticated(&plaintext),
     )?;
     let tokens = at(Stage::Services, inner.get("t"))?;
     if at(Stage::Services, tokens.dict())?.len() != 1
