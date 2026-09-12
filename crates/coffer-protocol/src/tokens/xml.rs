@@ -20,7 +20,7 @@
 //! syntax errors can only contain static public markup. All actual values are
 //! borrowed events or immediately placed in preallocated zeroizing buffers.
 
-use super::TokenError as Error;
+use super::{PlistProblem, ResponseStage, TokenError as Error};
 use base64::Engine as _;
 use quick_xml::{Reader, events::Event};
 use zeroize::Zeroizing;
@@ -105,22 +105,24 @@ fn whitespace(bytes: &[u8]) -> bool {
         .all(|c| matches!(c, b' ' | b'\r' | b'\n' | b'\t'))
 }
 
-fn preflight(bytes: &[u8]) -> Result<(), Error> {
+fn preflight(bytes: &[u8], stage: ResponseStage) -> Result<(), Error> {
     if bytes.len() > MAX_BODY {
         return Err(Error::TooLarge);
     }
     if bytes.starts_with(b"bplist") {
         return Err(Error::Unsupported);
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| Error::Malformed)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| malformed(stage, PlistProblem::Encoding))?;
     if !text.chars().all(valid_char) {
-        return Err(Error::Malformed);
+        return Err(malformed(stage, PlistProblem::Character));
     }
     let mut rest = text;
     let mut elements = 0;
     while let Some(start) = rest.find('<') {
         rest = &rest[start + 1..];
-        let end = rest.find('>').ok_or(Error::Malformed)?;
+        let end = rest
+            .find('>')
+            .ok_or(malformed(stage, PlistProblem::Markup))?;
         let markup = &rest[..end];
         let allowed = matches!(
             markup,
@@ -153,7 +155,7 @@ fn preflight(bytes: &[u8]) -> Result<(), Error> {
                 | "/date"
         ) || markup == DOCTYPE;
         if !allowed {
-            return Err(Error::Malformed);
+            return Err(malformed(stage, PlistProblem::Markup));
         }
         elements += 1;
         // Includes end tags and declarations as well: an intentionally stricter cap.
@@ -168,10 +170,21 @@ fn preflight(bytes: &[u8]) -> Result<(), Error> {
 struct Parser<'a> {
     reader: Reader<&'a [u8]>,
     bytes: &'a [u8],
+    stage: ResponseStage,
 }
+fn malformed(stage: ResponseStage, problem: PlistProblem) -> Error {
+    Error::MalformedPlist { stage, problem }
+}
+
 impl<'a> Parser<'a> {
+    fn malformed(&self, problem: PlistProblem) -> Error {
+        malformed(self.stage, problem)
+    }
+
     fn event(&mut self) -> Result<Event<'a>, Error> {
-        self.reader.read_event().map_err(|_| Error::Malformed)
+        self.reader
+            .read_event()
+            .map_err(|_| self.malformed(PlistProblem::XmlSyntax))
     }
     fn significant(&mut self) -> Result<Event<'a>, Error> {
         loop {
@@ -191,12 +204,16 @@ impl<'a> Parser<'a> {
         if empty {
             return Ok(Zeroizing::new(String::new()));
         }
-        let start = usize::try_from(self.reader.buffer_position()).map_err(|_| Error::Malformed)?;
-        let remaining = self.bytes.get(start..).ok_or(Error::Malformed)?;
+        let start = usize::try_from(self.reader.buffer_position())
+            .map_err(|_| self.malformed(PlistProblem::Scalar))?;
+        let remaining = self
+            .bytes
+            .get(start..)
+            .ok_or(self.malformed(PlistProblem::Scalar))?;
         let raw_len = remaining
             .iter()
             .position(|b| *b == b'<')
-            .ok_or(Error::Malformed)?;
+            .ok_or(self.malformed(PlistProblem::Scalar))?;
         // Entity decoding never expands UTF-8 relative to its ASCII spelling.
         // Allocate once, before writing any secret, and never grow the buffer.
         if raw_len > limit {
@@ -207,9 +224,10 @@ impl<'a> Parser<'a> {
             match self.event()? {
                 Event::End(end) if end.name().as_ref() == tag => return Ok(out),
                 Event::Text(text) => {
-                    let text = std::str::from_utf8(text.as_ref()).map_err(|_| Error::Malformed)?;
+                    let text = std::str::from_utf8(text.as_ref())
+                        .map_err(|_| self.malformed(PlistProblem::Scalar))?;
                     if text.contains("]]>") {
-                        return Err(Error::Malformed);
+                        return Err(self.malformed(PlistProblem::Scalar));
                     }
                     let mut chars = text.chars().peekable();
                     while let Some(c) = chars.next() {
@@ -224,8 +242,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Event::GeneralRef(reference) => {
-                    let raw =
-                        std::str::from_utf8(reference.as_ref()).map_err(|_| Error::Malformed)?;
+                    let raw = std::str::from_utf8(reference.as_ref())
+                        .map_err(|_| self.malformed(PlistProblem::Entity))?;
                     let c = match raw {
                         "amp" => '&',
                         "lt" => '<',
@@ -238,7 +256,7 @@ impl<'a> Parser<'a> {
                             } else if let Some(d) = raw.strip_prefix('#') {
                                 (d, 10)
                             } else {
-                                return Err(Error::Malformed);
+                                return Err(self.malformed(PlistProblem::Entity));
                             };
                             if digits.is_empty()
                                 || !digits.bytes().all(|b| {
@@ -249,18 +267,19 @@ impl<'a> Parser<'a> {
                                     }
                                 })
                             {
-                                return Err(Error::Malformed);
+                                return Err(self.malformed(PlistProblem::Entity));
                             }
                             char::from_u32(
-                                u32::from_str_radix(digits, radix).map_err(|_| Error::Malformed)?,
+                                u32::from_str_radix(digits, radix)
+                                    .map_err(|_| self.malformed(PlistProblem::Entity))?,
                             )
                             .filter(|c| valid_char(*c))
-                            .ok_or(Error::Malformed)?
+                            .ok_or(self.malformed(PlistProblem::Entity))?
                         }
                     };
                     out.push(c);
                 }
-                _ => return Err(Error::Malformed),
+                _ => return Err(self.malformed(PlistProblem::Scalar)),
             }
         }
     }
@@ -271,7 +290,7 @@ impl<'a> Parser<'a> {
         let (start, empty) = match event {
             Event::Start(s) => (s, false),
             Event::Empty(s) => (s, true),
-            _ => return Err(Error::Malformed),
+            _ => return Err(self.malformed(PlistProblem::Structure)),
         };
         let name = start.name();
         let tag = name.as_ref();
@@ -289,14 +308,14 @@ impl<'a> Parser<'a> {
                     let empty_key = match &event {
                         Event::Start(s) if s.name().as_ref() == b"key" => false,
                         Event::Empty(s) if s.name().as_ref() == b"key" => true,
-                        _ => return Err(Error::Malformed),
+                        _ => return Err(self.malformed(PlistProblem::Structure)),
                     };
                     let key = self.scalar(b"key", MAX_KEY, empty_key)?;
                     if entries
                         .iter()
                         .any(|(k, _): &(Zeroizing<String>, Value)| **k == *key)
                     {
-                        return Err(Error::Malformed);
+                        return Err(self.malformed(PlistProblem::DuplicateKey));
                     }
                     let event = self.significant()?;
                     let value = self.value(event, depth + 1)?;
@@ -325,7 +344,7 @@ impl<'a> Parser<'a> {
                     || !digits.bytes().all(|b| b.is_ascii_digit())
                     || text.parse::<i64>().is_err()
                 {
-                    return Err(Error::Malformed);
+                    return Err(self.malformed(PlistProblem::Integer));
                 }
                 Ok(Value::Integer(text))
             }
@@ -339,7 +358,7 @@ impl<'a> Parser<'a> {
                 let mut bytes = Zeroizing::new(vec![0; size]);
                 let len = base64::engine::general_purpose::STANDARD
                     .decode_slice(text.as_bytes(), &mut bytes)
-                    .map_err(|_| Error::Malformed)?;
+                    .map_err(|_| self.malformed(PlistProblem::Base64))?;
                 if len > MAX_DATA {
                     return Err(Error::TooLarge);
                 }
@@ -351,7 +370,7 @@ impl<'a> Parser<'a> {
             b"real" => {
                 let text = self.scalar(tag, 64, empty)?;
                 if !text.parse::<f64>().is_ok_and(f64::is_finite) {
-                    return Err(Error::Malformed);
+                    return Err(self.malformed(PlistProblem::Real));
                 }
                 Ok(Value::OtherScalar(text))
             }
@@ -370,12 +389,12 @@ impl<'a> Parser<'a> {
                         .enumerate()
                         .all(|(i, b)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit())
                 {
-                    return Err(Error::Malformed);
+                    return Err(self.malformed(PlistProblem::Date));
                 }
                 let number = |start: usize, end: usize| {
                     text[start..end]
                         .parse::<u32>()
-                        .map_err(|_| Error::Malformed)
+                        .map_err(|_| self.malformed(PlistProblem::Date))
                 };
                 let year = number(0, 4)?;
                 let month = number(5, 7)?;
@@ -391,7 +410,7 @@ impl<'a> Parser<'a> {
                             28
                         }
                     }
-                    _ => return Err(Error::Malformed),
+                    _ => return Err(self.malformed(PlistProblem::Date)),
                 };
                 if year == 0
                     || !(1..=days).contains(&number(8, 10)?)
@@ -399,20 +418,21 @@ impl<'a> Parser<'a> {
                     || number(14, 16)? > 59
                     || number(17, 19)? > 59
                 {
-                    return Err(Error::Malformed);
+                    return Err(self.malformed(PlistProblem::Date));
                 }
                 Ok(Value::OtherScalar(text))
             }
-            _ => Err(Error::Malformed),
+            _ => Err(self.malformed(PlistProblem::Structure)),
         }
     }
 }
 
-pub(super) fn parse(bytes: &[u8]) -> Result<Value, Error> {
-    preflight(bytes)?;
+pub(super) fn parse_at(bytes: &[u8], stage: ResponseStage) -> Result<Value, Error> {
+    preflight(bytes, stage)?;
     let mut parser = Parser {
         reader: Reader::from_reader(bytes),
         bytes,
+        stage,
     };
     let mut event = parser.significant()?;
     if matches!(event, Event::Decl(_)) {
@@ -422,15 +442,17 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Value, Error> {
         event = parser.significant()?;
     }
     if !matches!(&event, Event::Start(s) if s.name().as_ref() == b"plist") {
-        return Err(Error::Malformed);
+        return Err(malformed(stage, PlistProblem::Structure));
     }
     let event = parser.significant()?;
     let value = parser.value(event, 1)?;
-    value.dict()?;
+    value
+        .dict()
+        .map_err(|_| malformed(stage, PlistProblem::Structure))?;
     if !matches!(parser.significant()?, Event::End(e) if e.name().as_ref() == b"plist")
         || !matches!(parser.significant()?, Event::Eof)
     {
-        return Err(Error::Malformed);
+        return Err(malformed(stage, PlistProblem::Structure));
     }
     Ok(value)
 }
@@ -438,6 +460,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Value, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn parse(bytes: &[u8]) -> Result<Value, Error> {
+        parse_at(bytes, ResponseStage::OuterPlist)
+    }
     fn wrapped(value: &str) -> Vec<u8> {
         format!("<plist version=\"1.0\"><dict><key>unknown</key>{value}</dict></plist>")
             .into_bytes()

@@ -216,8 +216,9 @@ fn every_envelope_truncation_and_authenticated_component_fails_closed() {
     assert_eq!(failure(envelope(&vec![0; 65537])), TokenError::TooLarge);
     assert_eq!(
         failure(envelope(&encrypt(b""))),
-        TokenError::MalformedResponse {
-            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist
+        TokenError::MalformedPlist {
+            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist,
+            problem: coffer_protocol::tokens::PlistProblem::Structure,
         }
     );
     assert_eq!(
@@ -335,8 +336,9 @@ fn inner_fields_types_duplicates_expiry_and_service_are_validated() {
     );
     assert_eq!(
         failure(envelope(&encrypt(duplicate_service.as_bytes()))),
-        TokenError::MalformedResponse {
-            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist
+        TokenError::MalformedPlist {
+            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist,
+            problem: coffer_protocol::tokens::PlistProblem::DuplicateKey,
         }
     );
     let multiple_service = good.replace(
@@ -632,8 +634,54 @@ fn malformed_response_locations_are_static_and_stop_after_one_exchange() {
         ),
     ] {
         let error = failure(body);
-        assert_eq!(error, TokenError::MalformedResponse { stage });
+        let expected = if matches!(stage, Stage::OuterPlist | Stage::AuthenticatedPlist) {
+            TokenError::MalformedPlist {
+                stage,
+                problem: coffer_protocol::tokens::PlistProblem::Structure,
+            }
+        } else {
+            TokenError::MalformedResponse { stage }
+        };
+        assert_eq!(error, expected);
         assert!(error.to_string().contains(&stage.to_string()));
         assert!(!format!("{error:?} {error}").contains("SYNTHETIC"));
+    }
+}
+
+#[test]
+fn plist_problem_categories_never_retain_remote_material() {
+    use coffer_protocol::tokens::{PlistProblem as Problem, ResponseStage as Stage};
+    let wrap = |value: &str| {
+        format!("<plist version=\"1.0\"><dict><key>x</key>{value}</dict></plist>").into_bytes()
+    };
+    for (plaintext, problem) in [
+        (vec![0xff], Problem::Encoding),
+        (b"SYNTHETIC\0SECRET".to_vec(), Problem::Character),
+        (wrap("<SYNTHETIC-SECRET/>"), Problem::Markup),
+        (wrap("<dict></array>"), Problem::XmlSyntax),
+        (b"SYNTHETIC-SECRET".to_vec(), Problem::Structure),
+        (
+            wrap("<dict><key>SYNTHETIC</key><true/><key>SYNTHETIC</key><false/></dict>"),
+            Problem::DuplicateKey,
+        ),
+        (wrap("<string>&SYNTHETIC;</string>"), Problem::Entity),
+        (wrap("<string><true/></string>"), Problem::Scalar),
+        (
+            wrap("<integer>18446744073709551615</integer>"),
+            Problem::Integer,
+        ),
+        (wrap("<data>SYNTHETIC!</data>"), Problem::Base64),
+        (wrap("<real>nan</real>"), Problem::Real),
+        (wrap("<date>2026-02-30T00:00:00Z</date>"), Problem::Date),
+    ] {
+        for (body, stage) in [
+            (plaintext.clone(), Stage::OuterPlist),
+            (envelope(&encrypt(&plaintext)), Stage::AuthenticatedPlist),
+        ] {
+            let error = failure(body);
+            assert_eq!(error, TokenError::MalformedPlist { stage, problem });
+            assert!(error.to_string().contains(&problem.to_string()));
+            assert!(!format!("{error:?} {error}").contains("SYNTHETIC"));
+        }
     }
 }

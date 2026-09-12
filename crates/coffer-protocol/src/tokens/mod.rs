@@ -222,6 +222,53 @@ impl fmt::Display for ResponseStage {
     }
 }
 
+/// Closed, secret-free plist validation categories. No remote text or offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlistProblem {
+    /// Failed UTF-8 encoding check.
+    Encoding,
+    /// Failed XML character validity check.
+    Character,
+    /// Failed lexical markup whitelist check.
+    Markup,
+    /// Failed XML event syntax check.
+    XmlSyntax,
+    /// Failed plist structure check.
+    Structure,
+    /// Failed duplicate dictionary key check.
+    DuplicateKey,
+    /// Failed character reference check.
+    Entity,
+    /// Failed scalar structure check.
+    Scalar,
+    /// Failed integer syntax or range check.
+    Integer,
+    /// Failed base64 encoding check.
+    Base64,
+    /// Failed finite real number check.
+    Real,
+    /// Failed UTC date syntax or range check.
+    Date,
+}
+impl fmt::Display for PlistProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Encoding => "UTF-8 encoding",
+            Self::Character => "XML character validity",
+            Self::Markup => "lexical markup whitelist",
+            Self::XmlSyntax => "XML event syntax",
+            Self::Structure => "plist structure",
+            Self::DuplicateKey => "duplicate dictionary key",
+            Self::Entity => "character reference",
+            Self::Scalar => "scalar structure",
+            Self::Integer => "integer syntax or range",
+            Self::Base64 => "base64 encoding",
+            Self::Real => "finite real number",
+            Self::Date => "UTC date syntax or range",
+        })
+    }
+}
+
 /// Secret-free issuance failures. No remote text or underlying error is retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenError {
@@ -250,13 +297,21 @@ pub enum TokenError {
     },
     /// Internal parser classification for invalid grammar, fields, or ranges.
     /// [`TokenClient::issue`] maps response malformations to
-    /// [`Self::MalformedResponse`]; callers of that API should match that variant.
+    /// [`Self::MalformedResponse`] or [`Self::MalformedPlist`]; callers should
+    /// match those variants.
     Malformed,
     /// An HTTP 200 response failed a check at a fixed, secret-free location.
     /// No remote bytes, keys, values, or parser error text are retained.
     MalformedResponse {
         /// The validation location, not the underlying cause.
         stage: ResponseStage,
+    },
+    /// A plist failed validation without retaining remote content.
+    MalformedPlist {
+        /// Outer or authenticated plaintext parsing location.
+        stage: ResponseStage,
+        /// Fixed failed-check category; no key, value, offset, or parser text.
+        problem: PlistProblem,
     },
     /// A byte, element, depth, or scalar bound was exceeded.
     TooLarge,
@@ -284,6 +339,9 @@ impl fmt::Display for TokenError {
             Self::Malformed => "malformed service-token response",
             Self::MalformedResponse { stage } => {
                 return write!(f, "malformed service-token response at {stage}");
+            }
+            Self::MalformedPlist { stage, problem } => {
+                return write!(f, "malformed service-token response at {stage}: {problem}");
             }
             Self::TooLarge => "service-token response exceeds a bound",
             Self::Unsupported => "unsupported service-token response format or service",

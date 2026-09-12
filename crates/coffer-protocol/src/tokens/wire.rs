@@ -163,7 +163,7 @@ pub(super) fn response(
     session: &SessionMaterialRef<'_>,
     service: Service,
 ) -> Result<IssuedToken, Error> {
-    let outer = at(Stage::OuterPlist, xml::parse(bytes))?;
+    let outer = at(Stage::OuterPlist, xml::parse_at(bytes, Stage::OuterPlist))?;
     let response = at(Stage::Response, outer.get("Response"))?;
     at(Stage::Response, response.dict())?;
     let status = at(Stage::Status, response.get("Status"))?;
@@ -190,7 +190,10 @@ pub(super) fn response(
         response.get("et").and_then(xml::Value::data),
     )?;
     let plaintext = at(Stage::Envelope, decrypt(envelope, session.key))?;
-    let inner = at(Stage::AuthenticatedPlist, xml::parse(&plaintext))?;
+    let inner = at(
+        Stage::AuthenticatedPlist,
+        xml::parse_at(&plaintext, Stage::AuthenticatedPlist),
+    )?;
     let tokens = at(Stage::Services, inner.get("t"))?;
     if at(Stage::Services, tokens.dict())?.len() != 1
         || at(Stage::Services, tokens.optional(service.identifier()))?.is_none()

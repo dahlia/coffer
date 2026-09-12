@@ -152,3 +152,18 @@ malformed-response error. The current control flow establishes HTTP 200 for
 that failure, but does not establish which parser check failed, successful
 AEAD verification, or token issuance. No response was retained and no retry
 occurred. The new fixed-stage diagnostics have synthetic evidence only.
+
+
+Plist failure categories
+------------------------
+
+A subsequent single request verified AES-GCM authentication/decryption using
+the stored session key, then failed authenticated plist grammar validation.
+This proves that part of session reuse, not valid token fields or expiry.
+
+`MalformedPlist` now distinguishes fixed encoding, character, markup, XML event,
+structure, duplicate-key, character-reference, scalar, integer, base64, real,
+and date checks. `MalformedResponse` still describes later schema validation.
+These categories contain no remote text, field name, offset, or excerpt. No
+parser acceptance, size limit, or cryptographic behavior changes. Synthetic
+tests verify classifications on outer and authenticated plaintext failures.
