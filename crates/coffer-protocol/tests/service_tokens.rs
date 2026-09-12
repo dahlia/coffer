@@ -214,7 +214,12 @@ fn every_envelope_truncation_and_authenticated_component_fails_closed() {
         TokenError::AuthenticationTag
     );
     assert_eq!(failure(envelope(&vec![0; 65537])), TokenError::TooLarge);
-    assert_eq!(failure(envelope(&encrypt(b""))), TokenError::Malformed);
+    assert_eq!(
+        failure(envelope(&encrypt(b""))),
+        TokenError::MalformedResponse {
+            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist
+        }
+    );
     assert_eq!(
         failure(envelope(&encrypt(b"bplist00synthetic"))),
         TokenError::Unsupported
@@ -330,7 +335,9 @@ fn inner_fields_types_duplicates_expiry_and_service_are_validated() {
     );
     assert_eq!(
         failure(envelope(&encrypt(duplicate_service.as_bytes()))),
-        TokenError::Malformed
+        TokenError::MalformedResponse {
+            stage: coffer_protocol::tokens::ResponseStage::AuthenticatedPlist
+        }
     );
     let multiple_service = good.replace(
         "<key>com.apple.gs.xcode.auth</key>",
@@ -522,7 +529,9 @@ fn non_string_scalars_cannot_be_used_as_tokens() {
         let bad = inner().replace("<string>SYNTHETIC-SERVICE-TOKEN</string>", value);
         assert_eq!(
             failure(envelope(&encrypt(bad.as_bytes()))),
-            TokenError::Malformed
+            TokenError::MalformedResponse {
+                stage: coffer_protocol::tokens::ResponseStage::Token
+            }
         );
     }
 }
@@ -551,4 +560,80 @@ fn untrusted_transport_cap_and_clock_rollback_are_rechecked() {
     ));
     assert_eq!(result.unwrap_err(), TokenError::Clock);
     assert_eq!(transport.count(), 1);
+}
+
+#[test]
+fn malformed_response_locations_are_static_and_stop_after_one_exchange() {
+    use coffer_protocol::tokens::ResponseStage as Stage;
+    let plist = |value: &str| format!("<plist version=\"1.0\">{value}</plist>").into_bytes();
+    let response = |value: &str| plist(&format!("<dict><key>Response</key>{value}</dict>"));
+    let status = |value: &str| {
+        response(&format!(
+            "<dict><key>Status</key><dict>{value}</dict></dict>"
+        ))
+    };
+    for (body, stage) in [
+        (b"SYNTHETIC-SECRET-NOT-XML".to_vec(), Stage::OuterPlist),
+        (plist("<dict/>"), Stage::Response),
+        (
+            response("<string>SYNTHETIC-SECRET</string>"),
+            Stage::Response,
+        ),
+        (response("<dict/>"), Stage::Status),
+        (
+            response("<dict><key>Status</key><string>SYNTHETIC-SECRET</string></dict>"),
+            Stage::Status,
+        ),
+        (status(""), Stage::StatusCode),
+        (
+            status("<key>ec</key><string>SYNTHETIC-SECRET</string>"),
+            Stage::StatusCode,
+        ),
+        (
+            status("<key>ec</key><integer>0</integer><key>em</key><data/>"),
+            Stage::StatusMessage,
+        ),
+        (
+            status("<key>ec</key><integer>0</integer><key>au</key><data/>"),
+            Stage::AdditionalAuthentication,
+        ),
+        (status("<key>ec</key><integer>0</integer>"), Stage::Envelope),
+        (envelope(&[]), Stage::Envelope),
+        (
+            envelope(&encrypt(b"SYNTHETIC-SECRET-NOT-XML")),
+            Stage::AuthenticatedPlist,
+        ),
+        (envelope(&encrypt(&plist("<dict/>"))), Stage::Services),
+        (
+            envelope(&encrypt(&plist(
+                "<dict><key>t</key><string>SYNTHETIC-SECRET</string></dict>",
+            ))),
+            Stage::Services,
+        ),
+        (
+            envelope(&encrypt(
+                inner()
+                    .replace("<key>token</key>", "<key>SYNTHETIC-MISSING</key>")
+                    .as_bytes(),
+            )),
+            Stage::Token,
+        ),
+        (
+            envelope(&encrypt(
+                inner()
+                    .replace("<key>expiry</key>", "<key>SYNTHETIC-MISSING</key>")
+                    .as_bytes(),
+            )),
+            Stage::Expiry,
+        ),
+        (
+            envelope(&encrypt(inner().replace("2000000000000", "-1").as_bytes())),
+            Stage::Expiry,
+        ),
+    ] {
+        let error = failure(body);
+        assert_eq!(error, TokenError::MalformedResponse { stage });
+        assert!(error.to_string().contains(&stage.to_string()));
+        assert!(!format!("{error:?} {error}").contains("SYNTHETIC"));
+    }
 }

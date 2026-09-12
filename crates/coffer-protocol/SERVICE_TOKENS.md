@@ -67,10 +67,15 @@ boolean indicating whether `au` was present. The selector value and remote
 message are never retained in an error. No undocumented server error number
 means “session expired.” Transport, malformed, oversized, unsupported,
 authentication-tag, clock, and locally expired-token outcomes remain distinct
-fixed classifications. These diagnostics identify the failing stage, not its
-underlying cause or permission to retry. The harness reports them without
-headers or response content. Remote text and adapter error strings never become
-diagnostic output.
+fixed classifications. Malformed HTTP 200 responses also retain a fixed
+`ResponseStage`: outer plist, Response/Status dictionary, individual status
+field, envelope, authenticated plaintext plist, service dictionary, token, or
+expiry. No remote field name, value, parser error, offset, or response excerpt
+is retained. Size, unsupported format, tag failure, and protocol rejection keep
+their existing classifications. These diagnostics identify the failing stage,
+not its underlying cause or permission to retry. The harness reports them
+without headers or response content. Remote text and adapter error strings
+never become diagnostic output.
 
 The encrypted `et` data contains three bytes `XYZ` as AAD, a 16-byte IV,
 ciphertext, then a 16-byte tag. RustCrypto `AesGcm<Aes256, U16>` authenticates
@@ -135,3 +140,15 @@ Apple request. The roadmap's M2 checkboxes remain open.
 [AEAD framing]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Crypto/AppTokens.swift
 [token schema]: https://github.com/xtool-org/xtool/blob/4208c77c8128568f8b938d0c67d2f4bdcf04e100/Sources/XKit/GrandSlam/Operations/GrandSlamFetchAppTokensOperation.swift
 [trust-operation semantics]: https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/TrustedPeersHelper/TrustedPeersHelperProtocol.h
+
+
+Fresh-session validation
+------------------------
+
+On 12 September 2026, the reviewed live authentication harness successfully
+stored and reloaded fresh GSA material without requiring 2FA. A separate
+process then made one Xcode token request and stopped with the former generic
+malformed-response error. The current control flow establishes HTTP 200 for
+that failure, but does not establish which parser check failed, successful
+AEAD verification, or token issuance. No response was retained and no retry
+occurred. The new fixed-stage diagnostics have synthetic evidence only.

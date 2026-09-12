@@ -15,7 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Independent composition of the pinned request facts and authenticated envelope.
-use super::{EpochMillis, IssuedToken, Service, SessionMaterialRef, TokenError as Error, xml};
+use super::{
+    EpochMillis, IssuedToken, ResponseStage as Stage, Service, SessionMaterialRef,
+    TokenError as Error, xml,
+};
 use crate::{
     anisette::AnisetteData,
     transport::{Method, Request},
@@ -148,21 +151,33 @@ pub(super) fn request(
     })
 }
 
+fn at<T>(stage: Stage, result: Result<T, Error>) -> Result<T, Error> {
+    result.map_err(|error| match error {
+        Error::Malformed => Error::MalformedResponse { stage },
+        other => other,
+    })
+}
+
 pub(super) fn response(
     bytes: &[u8],
     session: &SessionMaterialRef<'_>,
     service: Service,
 ) -> Result<IssuedToken, Error> {
-    let outer = xml::parse(bytes)?;
-    let response = outer.get("Response")?;
-    let status = response.get("Status")?;
-    let code = status.get("ec")?.integer()?;
-    if let Some(message) = status.optional("em")? {
-        message.text()?;
+    let outer = at(Stage::OuterPlist, xml::parse(bytes))?;
+    let response = at(Stage::Response, outer.get("Response"))?;
+    at(Stage::Response, response.dict())?;
+    let status = at(Stage::Status, response.get("Status"))?;
+    at(Stage::Status, status.dict())?;
+    let code = at(
+        Stage::StatusCode,
+        status.get("ec").and_then(xml::Value::integer),
+    )?;
+    if let Some(message) = at(Stage::StatusMessage, status.optional("em"))? {
+        at(Stage::StatusMessage, message.text())?;
     }
-    let secondary = status.optional("au")?;
+    let secondary = at(Stage::AdditionalAuthentication, status.optional("au"))?;
     if let Some(selector) = secondary {
-        selector.text()?;
+        at(Stage::AdditionalAuthentication, selector.text())?;
     }
     if code != 0 || secondary.is_some() {
         return Err(Error::Rejected {
@@ -170,21 +185,35 @@ pub(super) fn response(
             additional_authentication: secondary.is_some(),
         });
     }
-    let envelope = response.get("et")?.data()?;
-    let plaintext = decrypt(envelope, session.key)?;
-    let inner = xml::parse(&plaintext)?;
-    let tokens = inner.get("t")?;
-    if tokens.dict()?.len() != 1 || tokens.optional(service.identifier())?.is_none() {
+    let envelope = at(
+        Stage::Envelope,
+        response.get("et").and_then(xml::Value::data),
+    )?;
+    let plaintext = at(Stage::Envelope, decrypt(envelope, session.key))?;
+    let inner = at(Stage::AuthenticatedPlist, xml::parse(&plaintext))?;
+    let tokens = at(Stage::Services, inner.get("t"))?;
+    if at(Stage::Services, tokens.dict())?.len() != 1
+        || at(Stage::Services, tokens.optional(service.identifier()))?.is_none()
+    {
         return Err(Error::Unsupported);
     }
-    let entry = tokens.get(service.identifier())?;
-    let token = entry.get("token")?.text()?;
+    let entry = at(Stage::Services, tokens.get(service.identifier()))?;
+    let token = at(Stage::Token, entry.get("token").and_then(xml::Value::text))?;
     if token.is_empty() || token.chars().any(char::is_control) {
-        return Err(Error::Malformed);
+        return Err(Error::MalformedResponse {
+            stage: Stage::Token,
+        });
     }
-    let expiry = entry.get("expiry")?.integer()?;
-    let expires = EpochMillis::new(u64::try_from(expiry).map_err(|_| Error::Malformed)?)
-        .map_err(|_| Error::Malformed)?;
+    let expiry = at(
+        Stage::Expiry,
+        entry.get("expiry").and_then(xml::Value::integer),
+    )?;
+    let expires = at(
+        Stage::Expiry,
+        u64::try_from(expiry)
+            .map_err(|_| Error::Malformed)
+            .and_then(|value| EpochMillis::new(value).map_err(|_| Error::Malformed)),
+    )?;
     Ok(IssuedToken {
         account: Zeroizing::new(session.account.to_owned()),
         service,

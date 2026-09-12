@@ -175,6 +175,53 @@ impl fmt::Debug for IssuedToken {
     }
 }
 
+/// Fixed validation locations, never derived from remote field names or values.
+///
+/// A location describes a failed check, not successful token issuance or permission
+/// to retry. Authenticated locations are reached only after AES-GCM verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseStage {
+    /// Validation of outer plist grammar.
+    OuterPlist,
+    /// Validation of Response dictionary.
+    Response,
+    /// Validation of Status dictionary.
+    Status,
+    /// Validation of protocol status code.
+    StatusCode,
+    /// Validation of protocol status message type.
+    StatusMessage,
+    /// Validation of additional authentication selector type.
+    AdditionalAuthentication,
+    /// Validation of encrypted envelope field or framing.
+    Envelope,
+    /// Validation of authenticated plaintext plist grammar.
+    AuthenticatedPlist,
+    /// Validation of token service dictionary.
+    Services,
+    /// Validation of token field.
+    Token,
+    /// Validation of expiry field or range.
+    Expiry,
+}
+impl fmt::Display for ResponseStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OuterPlist => "outer plist grammar",
+            Self::Response => "Response dictionary",
+            Self::Status => "Status dictionary",
+            Self::StatusCode => "protocol status code",
+            Self::StatusMessage => "protocol status message type",
+            Self::AdditionalAuthentication => "additional authentication selector type",
+            Self::Envelope => "encrypted envelope field or framing",
+            Self::AuthenticatedPlist => "authenticated plaintext plist grammar",
+            Self::Services => "token service dictionary",
+            Self::Token => "token field",
+            Self::Expiry => "expiry field or range",
+        })
+    }
+}
+
 /// Secret-free issuance failures. No remote text or underlying error is retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenError {
@@ -201,8 +248,16 @@ pub enum TokenError {
         /// The selector value is never retained.
         additional_authentication: bool,
     },
-    /// The XML grammar, field types, required fields, or numeric ranges were invalid.
+    /// Internal parser classification for invalid grammar, fields, or ranges.
+    /// [`TokenClient::issue`] maps response malformations to
+    /// [`Self::MalformedResponse`]; callers of that API should match that variant.
     Malformed,
+    /// An HTTP 200 response failed a check at a fixed, secret-free location.
+    /// No remote bytes, keys, values, or parser error text are retained.
+    MalformedResponse {
+        /// The validation location, not the underlying cause.
+        stage: ResponseStage,
+    },
     /// A byte, element, depth, or scalar bound was exceeded.
     TooLarge,
     /// Binary plist, unknown envelope magic, or unsupported service response.
@@ -227,6 +282,9 @@ impl fmt::Display for TokenError {
                 return write!(f, "service-token protocol rejection: code {code}; additional authentication: {additional_authentication}");
             }
             Self::Malformed => "malformed service-token response",
+            Self::MalformedResponse { stage } => {
+                return write!(f, "malformed service-token response at {stage}");
+            }
             Self::TooLarge => "service-token response exceeds a bound",
             Self::Unsupported => "unsupported service-token response format or service",
             Self::AuthenticationTag => "service-token authentication tag mismatch",
