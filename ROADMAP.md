@@ -163,10 +163,12 @@ may consume a finite server-side attempt budget.
 
 ### CKKS
 
-An offline AES-SIV key-unwrapping primitive is implemented with independent
-synthetic vectors. This does not validate a key hierarchy, recover a trusted
-root, decrypt credential records, or establish live CKKS interoperability.
-The items below remain incomplete.
+Offline AES-SIV key unwrapping and bounded whole-graph structural validation
+are implemented with independent synthetic vectors. A caller-supplied anchor
+can unwrap one selected class-key path. This does not authenticate metadata,
+establish anchor trust, prove collection completeness, retrieve records,
+decrypt credential items, or establish live CKKS interoperability. The items
+below remain incomplete.
 
  -  [ ] Retrieve CKKS zones and record changes.
  -  [ ] Recover the top-level key hierarchy.

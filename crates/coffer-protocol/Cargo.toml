@@ -52,6 +52,8 @@ zeroize = "1.9.0"
 aes-siv = { version = "0.8.0", default-features = false, features = ["zeroize"] }
 # Enable wiping of the MAC state used internally by aes-siv.
 cmac = { version = "0.8.0", default-features = false, features = ["zeroize"] }
+# Compare a supplied TLK with its self-unwrapped key without early exit.
+subtle = { version = "2.6.1", default-features = false }
 
 [dev-dependencies]
 # Validate that the embedded Apple root is a parseable trust anchor.  This is

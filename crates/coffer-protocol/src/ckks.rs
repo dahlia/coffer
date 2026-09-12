@@ -14,10 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Offline CKKS key unwrapping. No record retrieval or trust/recovery operations.
+//! Offline CKKS key unwrapping and bounded graphs. No retrieval or trust/recovery operations.
 //!
 //! This primitive authenticates wrapped key bytes, not record identity or trust.
-//! The caller must validate account/zone/key-class/parent bindings separately.
+//! The caller must authenticate account/zone/key-class/parent bindings separately.
+//! [`hierarchy`] checks supplied metadata for structural consistency only.
 //! In particular, successfully unwrapping a self-wrapped key does not establish
 //! a trusted root. Supply root keys only from an independently verified source.
 //! Item ciphertext has a different envelope and is not accepted here.
@@ -30,6 +31,9 @@
 //! Owned key and working buffers are zeroized on drop; AES, SIV and CMAC
 //! zeroization features are enabled. This does not guarantee erasure of every
 //! compiler-generated copy or temporary inside external cryptographic code.
+
+/// Bounded, offline validation and selected-path key unwrapping.
+pub mod hierarchy;
 
 use aes_siv::{KeyInit, Tag, siv::Aes256Siv};
 use core::fmt;

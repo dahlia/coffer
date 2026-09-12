@@ -28,6 +28,17 @@ The last file is a negative vector for the no-AD primitive. Self-unwrapping
 requires the existing key and does not bootstrap trust. The two-level vector
 checks explicit crypto composition, not parent UUID/class/account validation.
 
+The graph regression tests in *src/ckks/hierarchy/tests.rs* reuse these
+unchanged bytes with independently invented metadata. Key A is the selected
+self-wrapped TLK, B can be a historical TLK below A, and C a Class A/C key
+below B. Other tests bind B directly as a Class A/C child of A. Record names
+such as `root`, `old-tlk` and `old-class`, and every account/container/zone
+value, are synthetic. No source implementation or captured metadata supplied
+these graph fixtures. Rebinding tests deliberately reuse B under different
+valid names/classes to show that no-AD authentication does not authenticate
+those metadata claims. See [*CKKS.md*](../../../CKKS.md) for the bounded
+offline graph contract.
+
 Generation on 12 September 2026 used OpenSSL 3.5.8 (25 August 2026) through
 Python ctypes and system libcrypto's EVP interface, independently of
 RustCrypto. To reproduce each row, fetch `AES-256-SIV` with `EVP_CIPHER_fetch`,

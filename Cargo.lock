@@ -468,6 +468,7 @@ dependencies = [
  "rustls",
  "sha2",
  "srp",
+ "subtle",
  "zeroize",
 ]
 
