@@ -54,6 +54,10 @@ aes-siv = { version = "0.8.0", default-features = false, features = ["zeroize"] 
 cmac = { version = "0.8.0", default-features = false, features = ["zeroize"] }
 # Compare a supplied TLK with its self-unwrapped key without early exit.
 subtle = { version = "2.6.1", default-features = false }
+# Offline Octagon P-384 encoding and ECDSA/SHA-384 verification.
+# 0.14 unifies hybrid-array/subtle support and breaks srp 0.7.0-rc.3
+# Array-vs-slice ct_eq resolution. Keep this graph separate until re-reviewed.
+p384 = { version = "=0.13.1", default-features = false, features = ["ecdsa", "pkcs8", "alloc"] }
 
 [dev-dependencies]
 # Validate that the embedded Apple root is a parseable trust anchor.  This is

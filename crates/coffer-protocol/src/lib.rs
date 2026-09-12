@@ -50,14 +50,18 @@
 //! concrete developer-harness transport, and Linux Secret Service storage so
 //! those platform concerns do not enter this runtime-neutral protocol layer.
 //! Stored-session service-token issuance lives in [`tokens`]. The [`ckks`]
-//! module provides only an offline key-unwrapping primitive. CloudKit transport,
-//! Octagon, key hierarchy validation, and credential retrieval remain later work.
+//! module provides offline key unwrapping and bounded key-hierarchy validation
+//! using a caller-supplied anchor; it does not establish anchor trust. The
+//! [`octagon`] module provides offline P-384 key encodings and ECDSA/SHA-384
+//! verification. CloudKit transport, Octagon peer identity and trust, and
+//! credential retrieval remain later work.
 #![forbid(unsafe_code)]
 
 pub mod anisette;
 pub mod auth;
 pub mod ckks;
 pub mod entropy;
+pub mod octagon;
 pub mod pki;
 pub mod secret;
 pub mod transport;
