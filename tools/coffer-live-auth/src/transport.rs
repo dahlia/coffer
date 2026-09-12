@@ -39,6 +39,7 @@
 
 use core::fmt;
 use std::io::Read;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -167,17 +168,48 @@ impl Deadlines {
 
     fn remaining(&self, now: Instant) -> Option<Duration> {
         let until_overall = self.overall.checked_duration_since(now)?;
-        if until_overall.is_zero() {
+        if until_overall.is_zero() || self.per_exchange.is_zero() {
             return None;
         }
         Some(until_overall.min(self.per_exchange))
     }
 }
 
+#[derive(Debug)]
+enum DeadlinePolicy {
+    Fixed(Deadlines),
+    OnFirstExchange {
+        per_exchange: Duration,
+        total: Duration,
+        started: OnceLock<Instant>,
+    },
+}
+
+impl DeadlinePolicy {
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::Fixed(deadlines) => deadlines.remaining(now),
+            Self::OnFirstExchange {
+                per_exchange,
+                total,
+                started,
+            } => {
+                let start = *started.get_or_init(|| now);
+                let overall = start.checked_add(*total)?;
+                Deadlines {
+                    per_exchange: *per_exchange,
+                    overall,
+                }
+                .remaining(now)
+            }
+        }
+    }
+}
+
 /// The GSA [`Transport`].
 pub struct GsaTransport<X> {
     exchange: X,
-    deadlines: Deadlines,
+    deadlines: DeadlinePolicy,
 }
 
 impl GsaTransport<UreqExchange> {
@@ -194,7 +226,29 @@ impl<X: Exchange> GsaTransport<X> {
     pub fn new(exchange: X, deadlines: Deadlines) -> Self {
         Self {
             exchange,
-            deadlines,
+            deadlines: DeadlinePolicy::Fixed(deadlines),
+        }
+    }
+
+    /// Starts the total budget at the first validated exchange, excluding
+    /// initial interactive input. Subsequent calls share the same deadline,
+    /// including time spent waiting for 2FA and post-2FA password input.
+    ///
+    /// This does not retry, reset an expired budget, or extend a server session.
+    /// Zero or unrepresentable budgets fail before calling the exchange.
+    #[must_use]
+    pub fn starting_on_first_exchange(
+        exchange: X,
+        per_exchange: Duration,
+        total: Duration,
+    ) -> Self {
+        Self {
+            exchange,
+            deadlines: DeadlinePolicy::OnFirstExchange {
+                per_exchange,
+                total,
+                started: OnceLock::new(),
+            },
         }
     }
 
@@ -665,6 +719,74 @@ pub(crate) mod tests {
         let error = futures_lite::future::block_on(transport.send(post_request())).unwrap_err();
         assert_eq!(error, TransportError::Timeout);
         assert_eq!(transport.exchange.calls(), 0);
+    }
+
+    #[test]
+    fn initial_input_wait_does_not_consume_or_reset_the_budget() {
+        let construction = Instant::now();
+        let first_send = construction + Duration::from_secs(3600);
+        let transport = GsaTransport::starting_on_first_exchange(
+            FakeExchange::new(vec![]),
+            Duration::from_secs(30),
+            Duration::from_secs(1200),
+        );
+        assert_eq!(
+            transport.deadlines.remaining(first_send),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            transport
+                .deadlines
+                .remaining(first_send + Duration::from_secs(1199)),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            transport
+                .deadlines
+                .remaining(first_send + Duration::from_secs(1200)),
+            None
+        );
+        assert_eq!(
+            transport
+                .deadlines
+                .remaining(first_send + Duration::from_secs(2400)),
+            None
+        );
+        assert_eq!(transport.exchange.calls(), 0);
+    }
+
+    #[test]
+    fn deferred_budget_failure_sends_nothing() {
+        for (per_exchange, total) in [
+            (Duration::from_secs(30), Duration::ZERO),
+            (Duration::from_secs(30), Duration::MAX),
+            (Duration::ZERO, Duration::from_secs(1200)),
+        ] {
+            let transport = GsaTransport::starting_on_first_exchange(
+                FakeExchange::new(vec![]),
+                per_exchange,
+                total,
+            );
+            assert_eq!(
+                futures_lite::future::block_on(transport.send(post_request())).unwrap_err(),
+                TransportError::Timeout
+            );
+            assert_eq!(transport.exchange.calls(), 0);
+        }
+    }
+
+    #[test]
+    fn deferred_transport_failure_is_not_retried() {
+        let transport = GsaTransport::starting_on_first_exchange(
+            FakeExchange::new(vec![Err(TransportError::Timeout)]),
+            Duration::from_secs(30),
+            Duration::from_secs(1200),
+        );
+        assert_eq!(
+            futures_lite::future::block_on(transport.send(post_request())).unwrap_err(),
+            TransportError::Timeout
+        );
+        assert_eq!(transport.exchange.calls(), 1);
     }
 
     #[test]

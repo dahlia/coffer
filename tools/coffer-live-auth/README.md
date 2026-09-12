@@ -44,6 +44,12 @@ the fixed `gsa.apple.com` endpoints use Apple's published “Apple Inc. Root” 
 their sole trust anchor while retaining certificate and hostname verification;
 the Apple CDN bootstrap continues to use the public WebPKI.
 
+The authentication HTTP budget starts at the first validated exchange, after
+initial account/password input, and lasts 20 minutes. Each exchange retains
+its own timeout. Later 2FA/password prompts consume the remaining total budget;
+they do not reset it. A timeout alone does not prove server rejection or even
+that the current request reached Apple. No failure triggers another attempt.
+
 
 Human interaction points
 ------------------------

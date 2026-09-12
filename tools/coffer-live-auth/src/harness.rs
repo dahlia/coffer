@@ -57,7 +57,9 @@ use crate::store::{
     PersistError, SecretServiceConnector, check_keyring_available, persist_and_reload,
 };
 use crate::terminal::{SecureTerminal, TerminalError};
-use crate::transport::{Deadlines, GsaTransport};
+#[cfg(test)]
+use crate::transport::Deadlines;
+use crate::transport::{GsaTransport, UreqExchange};
 
 /// File name of the sandboxed helper built from `coffer-anisette`.
 pub const HELPER_EXECUTABLE: &str = "coffer-anisette-helper";
@@ -563,8 +565,11 @@ pub fn run<T: SecureTerminal>(terminal: &mut T) -> Result<Report, HarnessError> 
     )
     .map_err(HarnessError::Anisette)?;
 
-    let transport =
-        GsaTransport::production(Deadlines::starting_now(EXCHANGE_TIMEOUT, RUN_DEADLINE));
+    let transport = GsaTransport::starting_on_first_exchange(
+        UreqExchange::new(),
+        EXCHANGE_TIMEOUT,
+        RUN_DEADLINE,
+    );
     let authenticator = Authenticator::new(transport, provider, entropy);
     let outcome = block_on(run_login(&authenticator, terminal)).map_err(HarnessError::Flow)?;
 
