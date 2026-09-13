@@ -131,6 +131,11 @@ description = "Run one confirmed fresh-login and delegate issuance with Secret S
 depends = ["build-live-delegate"]
 run = "cargo run --quiet --locked -p coffer-live-auth --bin coffer-live-delegate"
 
+# Opt-in build only: invocation requires a reviewed private selector pipe.
+[tasks.build-live-delegate-op]
+description = "Build the 1Password pipe delegate harness and existing-state helper"
+run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-delegate-op"
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

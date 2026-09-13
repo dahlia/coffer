@@ -268,13 +268,141 @@ separate delegate envelope holds the explicit binding and issued tokens.
 Diagnostics contain only fixed stage/cause/retention labels, never raw sources,
 account/client identifiers, PETs, tokens, keys, or response bodies.
 
-### Safe terminal handoff
+### Safe terminal handoff for the original binary
 
 After review and a separate one-run authorization, the human takes over the
 existing controlling TTY for the visible confirmation and hidden account,
 password, optional code, and optional second password. The binary refuses every
-argument before opening the terminal. Credentials must not be supplied through
-arguments, environment, standard input, files, chat, or an agent/secret-manager
-command. Do not capture or replay terminal input. The existing terminal adapter
-restores hidden-input mode on its supported interruption paths; an interruption
-ends this run and requires a new human decision before another attempt.
+argument before opening the terminal. In this TTY-only binary, credentials must
+not be supplied through arguments, environment, standard input, files, chat, or
+an agent/secret-manager command. Do not capture or replay terminal input. The
+existing terminal adapter restores hidden-input mode on its supported
+interruption paths; an interruption ends this run and requires a new human
+decision before another attempt.
+
+
+1Password delegate input: offline implementation
+------------------------------------------------
+
+`coffer-live-delegate-op` is a separate developer-only entry point for the
+explicitly authorized 1Password handoff. It passes `OpTerminal` to the existing
+`delegate_harness::run`. The original `coffer-live-delegate` remains TTY-only;
+the new entry point changes only account and password input. Preflight, the
+exact `LOGIN AND ISSUE` confirmation on the controlling TTY, stored GSA ADSID
+matching, request counts, local writes, and partial-failure behavior remain
+owned by the existing harness.
+
+Build it and the anisette helper without executing either:
+
+~~~~ sh
+mise run build-live-delegate-op
+~~~~
+
+Independent review and integrated CI must pass before a live handoff. This
+implementation and its synthetic tests do not establish compatibility with
+actual 1Password field output or authorize an Apple attempt.
+
+### Selector and credential channels
+
+The binary rejects every argument. Its inherited stdin must be an anonymous
+pipe containing exactly this frame: a 26-character item selector (lowercase
+ASCII letters/digits), LF, the expected account (1 to 256 UTF-8 bytes, without
+Unicode control characters), LF, then EOF. Both LFs and EOF are mandatory.
+The launcher must independently extract the expected account from the same
+user approval that selected the item, pass both values privately, and close
+the writer. It must never derive the expected account from fetched fields.
+
+The binary checks Linux descriptor metadata and the kernel's */proc/self/fd*
+link to reject regular files, named FIFOs, sockets, and terminals. Input is
+nonblocking, has a five-second deadline, and reads at most 285 bytes: a
+284-byte frame plus one overflow probe. Invalid sources, framing, nonblocking
+setup, read failures, timeouts, and oversized input all report the fixed
+selector error before a credential fetch. The selector and expected account
+remain in a zeroizing owner until the fetch; neither is printed or passed
+through arguments, environment, or a temporary file. The stdin exception
+accepts only this selector/account frame, never a password.
+
+No credential fetch occurs during construction, local preflight, or visible
+confirmation. Only the first account prompt after confirmation, with the exact
+label listed below, starts a single child process with this fixed argument
+vector:
+
+~~~~ text
+/usr/bin/op item get - --fields label=username,label=password --reveal --debug=false --cache=false --format human-readable --encoding UTF-8 --no-color
+~~~~
+
+Only the selector and one LF go to the child's stdin pipe, which is then
+closed. The expected account stays in the wrapper. Child stdout has a separate
+bounded pipe; stderr goes to the null device. GUI integration environment is
+inherited without reading its values or creating secret variables. Explicit
+flags pin formatting, encoding, color, cache, and debug behavior. The adapter
+never starts a sign-in, fallback, or second fetch. A fixed notice explains that
+unlock or approval may require human interaction in the 1Password application;
+a failure returns control.
+
+The [1Password item-command documentation] describes combined `username` and
+`password` selection as CSV. The adapter accepts exactly one row containing
+exactly two fields, including quoted commas and doubled quotes. It removes at
+most one terminal LF, preserves other whitespace, and rejects extra rows or
+fields, malformed quoting, empty values, invalid UTF-8, and Unicode control
+characters. Each decoded field is limited to the existing 1,024-byte terminal
+input bound. The encoded output limit is 4,102 bytes; the reader consumes at
+most 4,103 bytes including the overflow probe. Unsupported output fails before
+any Apple login. The adapter does not rely on output field order being
+guaranteed: the decoded first field must byte-exactly match the independently
+approved expected account. A mismatch, including swapped fields, produces a
+fixed error before returning any account or password to the login flow, with
+one fetch, zero Apple authentication calls, and no fallback or retry. It does
+not trim, case-fold, or normalize either account value.
+
+A 120-second budget covers child output and exit, starting before spawn. The
+pipes are nonblocking, with deadline checks between reads and waits. The child
+owner kills and reaps the direct child on failure, including timeout or excess
+output. Valid bytes are accepted only after a successful exit. Error labels
+contain no child output, exit text, arbitrary source error, or identifying data.
+Normal process scheduling and kernel termination/reaping still apply; this is
+not a sandbox for a compromised CLI or its descendants.
+
+[1Password item-command documentation]: https://www.1password.dev/cli/reference/management-commands/item
+
+### Prompt order and memory lifetime
+
+The wrapper accepts these exact hidden prompt labels in order:
+
+1.  `Apple Account (e-mail address or phone number, not echoed): `
+2.  `Password (not echoed): `
+3.  `Verification code (6 digits, not echoed): `, only if 2FA is required.
+4.  `Password again, for post-2FA re-authentication (not echoed): `, only after
+    the code prompt.
+
+Both fields must decode and the username must match the expected account
+before the account is returned.
+The account moves to the existing login flow. One zeroizing password copy is
+returned for initial authentication; the wrapper keeps the original only for
+the optional post-2FA exchange. OTP always goes through the wrapped terminal's
+`prompt_hidden`, with its existing echo and interruption handling. For post-2FA
+re-authentication, the wrapper transfers ownership of the retained password to
+the login flow without running `op` again. On the no-2FA branch, the first
+session-persistence notice wipes the retained password; the entry point also
+clears all retained input immediately after the harness returns. Any unknown,
+repeated, or out-of-order prompt permanently disables credential input and
+wipes the retained values. The wrapper replaces the two existing notices about
+typed input and discarded passwords with fixed text that accurately describes
+this adapter's input and retention.
+
+All Coffer-owned selector, expected-account, encoded-output, decoded-field, and
+password buffers
+use zeroizing owners. Encoded and decoded byte buffers are allocated to their
+bounds before reading and never grow while holding input. The CLI's own
+allocations, kernel pipe buffers, and abrupt process termination are outside
+this zeroization guarantee. No temporary credential file is created.
+
+Tests use synthetic CSV, scripted terminal/login steps, and local fake child
+processes only. They cover selection through stdin and EOF, argument/environment
+configuration, stdout bounds, nonzero exit, timeout/kill/reap, static failures,
+confirmation gating, exact account binding and swapped-field rejection before
+authentication, prompt rejection, OTP routing, and password reuse. A source
+assertion links the no-2FA wipe test to the real persistence notice and verifies
+that it precedes store connection and replacement. The
+worker did not invoke `op`, read an account or item, access Secret Service, load
+proprietary libraries, provision local state, or contact Apple.

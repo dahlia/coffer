@@ -42,12 +42,15 @@
 //!   restores the mode, and the run stops normally.
 //! - Signals from elsewhere (`kill`, a closing terminal).  `SIGINT`,
 //!   `SIGTERM`, and `SIGHUP` are registered once, at open time, through the
-//!   `signal-hook` crate.  Outside a hidden prompt they keep their default
-//!   action.  During one, the signal is only recorded; once the prompt has
-//!   restored the terminal the default action is emulated, so the process
-//!   still terminates the way it would have, but with the terminal intact.
+//!   `signal-hook` crate. Outside a hidden prompt or the op child lifetime
+//!   they keep their default action. During a hidden prompt, the signal is
+//!   only recorded; once the prompt has restored the terminal the default
+//!   action is emulated, so the process still terminates the way it would
+//!   have, but with the terminal intact.
 //!   The prompt's blocking read itself is not interrupted (the handlers are
 //!   installed with `SA_RESTART`), so termination happens when the line ends.
+//!   During op execution, polling observes the recorded signal and the child
+//!   is killed and reaped before the default action is emulated.
 
 use core::fmt;
 use std::fs::{File, OpenOptions};
@@ -68,7 +71,7 @@ pub const MAX_INPUT_LEN: usize = 1024;
 /// Path of the controlling terminal on Linux.
 const TTY_PATH: &str = "/dev/tty";
 
-/// Signals whose default action is deferred while a hidden prompt is active.
+/// Signals deferred while a hidden prompt or the op child is active.
 const DEFERRED_SIGNALS: [i32; 3] = [SIGINT, SIGTERM, SIGHUP];
 
 /// The user-facing terminal.
@@ -432,6 +435,37 @@ struct SignalDeferral {
 }
 
 static SIGNAL_DEFERRAL: OnceLock<Result<SignalDeferral, TerminalError>> = OnceLock::new();
+
+/// Borrows the terminal's signal deferral for one synchronous op child.
+///
+/// Create before spawning and drop only after killing/reaping the child.
+/// Poll `cancelled` during pipe I/O and exit waiting. This scope must not
+/// contain terminal prompts; the harness runs these operations sequentially.
+/// An already active deferral is rejected without changing its state.
+pub(crate) struct ChildSignalDeferral(&'static SignalDeferral);
+
+impl ChildSignalDeferral {
+    pub(crate) fn begin() -> Result<Self, TerminalError> {
+        let deferral = SignalDeferral::install()?;
+        deferral
+            .armed
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| TerminalError::SignalControlFailed)?;
+        Ok(Self(deferral))
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        self.0.pending.load(Ordering::SeqCst) != 0
+    }
+}
+
+impl Drop for ChildSignalDeferral {
+    fn drop(&mut self) {
+        if let Some(signal) = self.0.rearm() {
+            terminate_by(signal);
+        }
+    }
+}
 
 impl SignalDeferral {
     /// Registers the complete handler set exactly once for the whole process.
@@ -944,7 +978,7 @@ pub(crate) mod tests {
 
     /// Serializes the tests that touch the process-wide signal deferral or
     /// send a signal to the test process.
-    static SIGNAL_TESTS: Mutex<()> = Mutex::new(());
+    pub(crate) static SIGNAL_TESTS: Mutex<()> = Mutex::new(());
 
     #[test]
     fn a_signal_during_a_hidden_prompt_is_recorded_not_acted_on() {

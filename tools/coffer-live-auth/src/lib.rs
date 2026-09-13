@@ -32,8 +32,8 @@
 //!
 //! # Rules the harness enforces
 //!
-//! - Input comes only from `/dev/tty` ([`terminal`]).  There is no argument,
-//!   environment variable, or file that carries the account name, password,
+//! - The original binaries take input only from `/dev/tty` ([`terminal`]).
+//!   There is no argument, environment variable, or file that carries the account name, password,
 //!   or verification code, and the binary refuses to start with any
 //!   argument at all.
 //! - Every network step runs once.  A failure ends the run with a static,
@@ -47,6 +47,13 @@
 //! terminals, exchanges, and stores; `src/main.rs` is a few lines over
 //! [`harness::run`].  The interactive entry point is `mise run test-live-auth`,
 //! which is deliberately absent from `mise run test` and `mise run ci`.
+//!
+//! The separate `coffer-live-delegate-op` entry point narrowly substitutes
+//! [`op_input::OpTerminal`] for account/password input after preflight and TTY
+//! confirmation. Its opaque selector and independently approved expected account
+//! arrive in one private stdin frame; decoded username binding precedes login.
+//! Passwords arrive through one bounded child pipe and OTP remains hidden TTY input.
+//! This opt-in exception does not change the original binaries' input contract.
 //!
 //! # What the success report does and does not claim
 //!
@@ -63,6 +70,7 @@ pub mod delegate_transport;
 pub mod entropy;
 pub mod flow;
 pub mod harness;
+pub mod op_input;
 pub mod reuse;
 pub mod slot;
 pub mod store;
@@ -115,6 +123,8 @@ mod tests {
             ("reuse.rs", include_str!("reuse.rs")),
             ("delegate_harness.rs", include_str!("delegate_harness.rs")),
             ("delegate_main.rs", include_str!("delegate_main.rs")),
+            ("delegate_op_main.rs", include_str!("delegate_op_main.rs")),
+            ("op_input.rs", include_str!("op_input.rs")),
             ("slot.rs", include_str!("slot.rs")),
             ("store.rs", include_str!("store.rs")),
             ("terminal.rs", include_str!("terminal.rs")),
@@ -128,6 +138,12 @@ mod tests {
                 "var_os(\"PASS",
                 "io::stdin(",
             ] {
+                // Only this separately selected entry point accepts stdin,
+                // and its sole reader validates a private selector/account pipe frame.
+                if name == "op_input.rs" && forbidden == "io::stdin(" {
+                    assert_eq!(source.matches(forbidden).count(), 1);
+                    continue;
+                }
                 assert!(
                     !source.contains(forbidden),
                     "{name} must not contain {forbidden:?}"
