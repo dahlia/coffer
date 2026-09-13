@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>status</key><integer>0</integer>
+<key>dsid</key><string>000-synthetic-dsid</string>
+<key>delegates</key><dict><key>com.apple.mobileme</key><dict>
+<key>status</key><integer>0</integer>
+<key>service-data</key><dict><key>tokens</key><dict>
+<key>mmeAuthToken</key><string>SYNTHETIC-STORED-MME</string>
+<key>cloudKitToken</key><string>SYNTHETIC-STORED-CLOUDKIT</string>
+</dict></dict></dict></dict>
+</dict></plist>

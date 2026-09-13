@@ -22,10 +22,16 @@ use std::collections::BTreeMap;
 use oo7::dbus::{Collection, Error as Oo7Error, Service, ServiceError};
 
 use crate::codec;
+use crate::delegate_store::{self, Backend};
 use crate::store::{
     BackendOperation, DeleteFailure, DeleteOutcome, ReusableSession, SessionSlot, SessionStore,
     StoreError, UnavailableReason,
 };
+use crate::{
+    DelegateBindingRef, DelegateStore, DelegateStoreError, MAX_STORED_DELEGATE_BYTES,
+    StoredDelegateCredentials,
+};
+use zeroize::Zeroizing;
 
 /// Fixed Secret Service schema attribute.
 pub const SCHEMA_ATTRIBUTE: &str = "org.dahlia.Coffer.Authentication";
@@ -94,6 +100,85 @@ impl LinuxSecretService {
             ("kind", KIND_ATTRIBUTE.to_owned()),
             ("slot", slot.attribute_value()),
         ])
+    }
+}
+
+// The query contains only public constants and the opaque profile slot.
+const DELEGATE_KIND: &str = "delegate-auth-material";
+const DELEGATE_LABEL: &str = "Coffer delegate authentication material";
+fn delegate_attributes(slot: &SessionSlot) -> BTreeMap<&'static str, String> {
+    let mut attributes = LinuxSecretService::attributes(slot);
+    attributes.insert("kind", DELEGATE_KIND.to_owned());
+    attributes
+}
+
+impl Backend for LinuxSecretService {
+    type Item = oo7::dbus::Item;
+    async fn available(&self) -> Result<(), DelegateStoreError> {
+        self.check_available().await.map_err(Into::into)
+    }
+    async fn search(&self, slot: &SessionSlot) -> Result<Vec<Self::Item>, DelegateStoreError> {
+        self.collection
+            .search_items(&delegate_attributes(slot))
+            .await
+            .map_err(|error| classify(error, BackendOperation::Search).into())
+    }
+    async fn read(&self, item: &Self::Item) -> Result<Zeroizing<Vec<u8>>, DelegateStoreError> {
+        let secret = item
+            .secret()
+            .await
+            .map_err(|error| DelegateStoreError::from(classify(error, BackendOperation::Read)))?;
+        let raw = secret.as_bytes();
+        if raw.len() > MAX_STORED_DELEGATE_BYTES {
+            return Err(DelegateStoreError::TooLarge);
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(raw.len()));
+        bytes.extend_from_slice(raw);
+        Ok(bytes)
+    }
+    async fn write(
+        &self,
+        slot: &SessionSlot,
+        item: Option<&Self::Item>,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<(), DelegateStoreError> {
+        if let Some(item) = item {
+            // Preserve extra attributes by updating the exact validated object.
+            item.set_secret(bytes)
+                .await
+                .map_err(|error| classify(error, BackendOperation::Write).into())
+        } else {
+            // Do not let CreateItem replace a concurrently created, unvalidated
+            // record. A race can yield duplicates; subsequent lookup fails closed.
+            self.collection
+                .create_item(
+                    DELEGATE_LABEL,
+                    &delegate_attributes(slot),
+                    bytes,
+                    false,
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| classify(error, BackendOperation::Write).into())
+        }
+    }
+}
+impl DelegateStore for LinuxSecretService {
+    async fn load_delegate(
+        &self,
+        slot: &SessionSlot,
+        expected: DelegateBindingRef<'_>,
+    ) -> Result<Option<StoredDelegateCredentials>, DelegateStoreError> {
+        delegate_store::load(self, slot, expected).await
+    }
+    async fn replace_delegate(
+        &self,
+        slot: &SessionSlot,
+        expected: DelegateBindingRef<'_>,
+        value: &StoredDelegateCredentials,
+    ) -> Result<(), DelegateStoreError> {
+        delegate_store::replace(self, slot, expected, value).await
     }
 }
 
@@ -280,6 +365,21 @@ fn classify_zbus(error: &oo7::zbus::Error) -> Option<StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegate_query_is_disjoint_from_gsa_and_has_no_account_metadata() {
+        let slot = SessionSlot::from_random_bytes([0x53; 16]);
+        let gsa = LinuxSecretService::attributes(&slot);
+        let delegate = delegate_attributes(&slot);
+        assert_eq!(delegate.len(), 4);
+        assert_eq!(delegate["kind"], "delegate-auth-material");
+        assert_ne!(delegate["kind"], gsa["kind"]);
+        for key in [oo7::XDG_SCHEMA_ATTRIBUTE, "application", "slot"] {
+            assert_eq!(delegate[key], gsa[key]);
+        }
+        assert_eq!(DELEGATE_LABEL, "Coffer delegate authentication material");
+        assert!(!format!("{delegate:?} {DELEGATE_LABEL}").contains("SYNTHETIC"));
+    }
 
     #[test]
     fn attributes_are_stable_and_contain_only_constants_and_opaque_slot() {

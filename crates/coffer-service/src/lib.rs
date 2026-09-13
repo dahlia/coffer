@@ -28,6 +28,12 @@
 //! and has no plaintext, regular-file, or portal fallback.  Tests use
 //! [`FakeSessionStore`], whose contents and failures are wholly deterministic.
 //!
+//! [`DelegateStore`] separately persists issued delegate fields and explicit caller
+//! binding. [`StoredDelegateCredentials`] provides only redacted zeroizing ownership;
+//! it neither reconstructs a GSA session nor proves token reuse. Its Linux adapter
+//! shares the encrypted connection, while [`FakeDelegateStore`] supports offline
+//! reloads through independent synthetic connections.
+//!
 //! # Build requirement
 //!
 //! The Linux adapter uses oo7's OpenSSL crypto backend because oo7 0.6.0's
@@ -38,7 +44,11 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod delegate;
+mod delegate_codec;
+mod delegate_store;
 mod fake;
+mod fake_delegate;
 mod secret_service;
 mod store;
 
@@ -48,3 +58,9 @@ pub use store::{
     BackendOperation, DeleteFailure, DeleteOutcome, MAX_STORED_SESSION_BYTES, ReusableSession,
     SESSION_SLOT_LEN, SessionSlot, SessionStore, StoreError, UnavailableReason,
 };
+
+pub use delegate::{
+    DelegateBindingRef, DelegateStore, DelegateStoreError, MAX_STORED_DELEGATE_BYTES,
+    StoredDelegateCredentials,
+};
+pub use fake_delegate::{FakeDelegateOperation, FakeDelegateStore};
