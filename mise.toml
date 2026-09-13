@@ -121,6 +121,16 @@ description = "Run one interactive stored-session Xcode token issuance attempt"
 depends = ["build-live-token"]
 run = "cargo run --quiet --locked -p coffer-live-auth --bin coffer-live-token"
 
+# Explicit developer authentication; never a dependency of normal tests/CI.
+[tasks.build-live-delegate]
+description = "Build the delegate authentication harness and existing-state helper"
+run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-delegate"
+
+[tasks.test-live-delegate]
+description = "Run one confirmed fresh-login and delegate issuance with Secret Service persistence"
+depends = ["build-live-delegate"]
+run = "cargo run --quiet --locked -p coffer-live-auth --bin coffer-live-delegate"
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

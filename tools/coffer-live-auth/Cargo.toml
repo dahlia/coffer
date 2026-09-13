@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "coffer-live-token"
 path = "src/token_main.rs"
 
+[[bin]]
+name = "coffer-live-delegate"
+path = "src/delegate_main.rs"
+
 [dependencies]
 coffer-anisette = { path = "../../crates/coffer-anisette" }
 coffer-bootstrap = { path = "../../crates/coffer-bootstrap" }

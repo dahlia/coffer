@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anisette;
+pub mod delegate_harness;
 pub mod delegate_transport;
 pub mod entropy;
 pub mod flow;
@@ -112,6 +113,8 @@ mod tests {
             ("main.rs", include_str!("main.rs")),
             ("token_main.rs", include_str!("token_main.rs")),
             ("reuse.rs", include_str!("reuse.rs")),
+            ("delegate_harness.rs", include_str!("delegate_harness.rs")),
+            ("delegate_main.rs", include_str!("delegate_main.rs")),
             ("slot.rs", include_str!("slot.rs")),
             ("store.rs", include_str!("store.rs")),
             ("terminal.rs", include_str!("terminal.rs")),

@@ -127,8 +127,9 @@ Delegate transport: offline implementation
 The library's `delegate_transport::DelegateTransport` is a separate HTTPS
 adapter for legacy MobileMe delegate token issuance. It is covered by synthetic
 exchange/reader tests and production agent configuration assertions only.
-Neither binary invokes it, and there is no delegate frontend or credential
-input path. The adapter's existence is not authorization to execute it live.
+The separate developer-only `coffer-live-delegate` frontend described below
+composes it with explicit login and local persistence. The implementation
+is not authorization to execute it live.
 
 Its local allowlist accepts only `POST` to
 `https://setup.icloud.com/setup/iosbuddy/loginDelegates`, with a nonempty body
@@ -164,3 +165,116 @@ acceptance of the request profile, identifier binding, token lifetime/rotation,
 and registration/consent effects remain unknown. A timeout after transmission
 leaves issuance unknown. Integration, independent review and a separate explicit
 live plan are still required before any live attempt.
+
+
+Fresh-login delegate harness: offline implementation
+----------------------------------------------------
+
+`coffer-live-delegate` implements an explicit fresh GSA login, at most one
+legacy delegate issuance, and separate GSA/delegate Secret Service round trips.
+It has been developed with synthetic data. Live Apple acceptance, client
+binding, token lifetime/reuse/rotation, registration, consent, and security
+notification effects remain unverified. This is authentication/token issuance
+and may affect account protection or server state. There is no CloudKit
+initialization, trust join, recovery, keychain mutation, credential cache, or
+daemon.
+
+Build the harness and local anisette helper without running either:
+
+~~~~ sh
+mise run build-live-delegate
+~~~~
+
+The opt-in `test-live-delegate` task is excluded from normal tests and CI.
+Do not execute it until the coordinator's independent code-review-loop and
+integrated CI have passed and the user has authorized the concrete one-run
+plan, including the unknown server effects. An implementation report does not
+provide that authorization.
+
+### Existing-state preflight
+
+The harness calls only `SlotState::load` and `SessionStore::load` for its
+initial state. A missing, locked, duplicate, corrupt, or unsupported GSA item
+stops the run before password input or an Apple request. It reuses the token
+harness's `Bootstrap::installed`/`CofferAnisetteProvider::open_existing`
+preparation; there is no download, provisioning, new UUID, reset, or alternate
+profile. Normal local anisette generation may update existing local
+provisioning state.
+
+One validated local anisette result supplies the existing `device_id`. Coffer
+explicitly selects and retains that exact value as the delegate `client-id`;
+this policy does not prove Apple's binding requirements. The stored GSA ADSID
+and that client ID bind the delegate preflight. An existing validly decoded,
+bound item returns `AlreadyStored`, with no confirmation, password, fresh
+login, issuance, or local write. This result proves only local presence, not
+current validity or live reuse. Locked, duplicate, corrupt, unknown-version,
+or mismatched delegate records stop the run without changing them.
+
+### Confirmation and request counts
+
+Only a missing delegate item reaches the visible confirmation. The fixed
+notice explains fresh authentication, one delegate attempt, two separate local
+writes, and unknown token-rotation/registration/consent effects. The user must
+type exactly `LOGIN AND ISSUE`. Declining or interrupting that prompt causes
+zero hidden prompts and zero Apple requests.
+
+After confirmation, the existing `run_login` flow reads the account and password
+from the controlling terminal with echo disabled. Initial SRP uses at most two
+GSA exchanges. If trusted-device 2FA is required, there is one code push, one
+code submission, and at most two post-2FA SRP exchanges; the code and second
+password are also hidden terminal inputs. Thus a successful flow uses two GSA
+requests without 2FA or six with it, plus one delegate request. A failure stops
+at the current stage, without repeating login, a code, issuance, a store
+operation, an endpoint, or a record.
+
+The fresh ADSID must equal the stored ADSID. A mismatch stops before either
+local write or delegate issuance and preserves existing items. The fresh
+session must contain a usable password-equivalent token (PET); no IdMS/Xcode
+substitution is possible. Missing PET stops before delegate transport creation
+and before either write. The fresh GSA reusable subset is then written and
+reloaded through the existing `persist_and_reload`; failure prevents issuance.
+
+GSA's 20-minute total deadline starts at its first exchange, with a 60-second
+per-exchange limit. Later 2FA/password input uses the remaining budget. The
+separate delegate transport is constructed only after login, GSA persistence,
+and the final issuance notice. Its 300-second total and 60-second exchange
+limits therefore exclude earlier human input and store waits.
+
+Successful issuance is converted with
+`StoredDelegateCredentials::from_issued` and written once to the separate
+delegate item. A new connector connection reloads it; ADSID, client ID, DSID,
+MME token, and CloudKit token must all compare equal. The successful path uses
+five Secret Service connections: initial preflight, GSA writer, GSA reader,
+delegate writer, and delegate reader. It performs two explicit item-write
+operations, with no rollback or delete. Backend availability/search/read calls
+are implementation details of those bounded operations; there is no keyring
+or network retry loop. Serialize invocations for the same slot; concurrent
+writers are not a supported transaction model.
+
+### Partial failures and retained material
+
+| Failure point                                                                                       | Local state after stopping                                                                                                    |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Preflight, confirmation, login, ADSID mismatch, or missing PET                                      | Neither GSA nor delegate item is written by this run. A completed or interrupted login may already have server effects.       |
+| GSA write/reload                                                                                    | GSA storage may have changed. Delegate issuance/storage has not started.                                                      |
+| Delegate input conversion after issuance, issuance failure, or interruption before delegate storage | Fresh GSA material remains stored. Delegate issuance may have occurred; no delegate item was written by this run.             |
+| Delegate write, fresh connection, or reload/equality failure                                        | Fresh GSA material remains stored. Delegate storage may have changed, including when a write reports timeout or cancellation. |
+| Success                                                                                             | Both separately stored subsets round-tripped; this does not establish CloudKit access, expiry, or future reuse.               |
+
+The two writes are not an atomic transaction. Errors and interruptions trigger
+no cleanup, rollback, repair, fallback, or retry. In-memory owners are dropped
+and zeroized; the stored GSA subset omits account name and PET, while the
+separate delegate envelope holds the explicit binding and issued tokens.
+Diagnostics contain only fixed stage/cause/retention labels, never raw sources,
+account/client identifiers, PETs, tokens, keys, or response bodies.
+
+### Safe terminal handoff
+
+After review and a separate one-run authorization, the human takes over the
+existing controlling TTY for the visible confirmation and hidden account,
+password, optional code, and optional second password. The binary refuses every
+argument before opening the terminal. Credentials must not be supplied through
+arguments, environment, standard input, files, chat, or an agent/secret-manager
+command. Do not capture or replay terminal input. The existing terminal adapter
+restores hidden-input mode on its supported interruption paths; an interruption
+ends this run and requires a new human decision before another attempt.

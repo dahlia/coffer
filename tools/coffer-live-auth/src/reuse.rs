@@ -136,7 +136,7 @@ impl ArtifactSource for NoDownloads {
 }
 type TransportFactory = fn() -> GsaTransport<crate::transport::UreqExchange>;
 
-fn prepare_local() -> Result<(TransportFactory, CofferAnisetteProvider), ReuseError> {
+pub(crate) fn prepare_local() -> Result<(TransportFactory, CofferAnisetteProvider), ReuseError> {
     let paths = BootstrapPaths::from_environment().map_err(|_| ReuseError::LocalState)?;
     let installation = Bootstrap::new(paths.clone(), NoDownloads)
         .and_then(|b| b.installed())
