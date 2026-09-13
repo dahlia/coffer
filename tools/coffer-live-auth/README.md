@@ -119,3 +119,48 @@ The initial decoder supports strict XML plaintext only. Binary plist is
 explicitly unsupported. Offline vectors do not establish current Apple
 compatibility, GSA session lifetime, CloudKit access, or token rotation rules.
 See [the protocol scope](../../crates/coffer-protocol/SERVICE_TOKENS.md).
+
+
+Delegate transport: offline implementation
+------------------------------------------
+
+The library's `delegate_transport::DelegateTransport` is a separate HTTPS
+adapter for legacy MobileMe delegate token issuance. It is covered by synthetic
+exchange/reader tests and production agent configuration assertions only.
+Neither binary invokes it, and there is no delegate frontend or credential
+input path. The adapter's existence is not authorization to execute it live.
+
+Its local allowlist accepts only `POST` to
+`https://setup.icloud.com/setup/iosbuddy/loginDelegates`, with a nonempty body
+of at most 64 KiB and exactly one `Content-Type: text/xml`. This media type and
+these limits define the initial Coffer subset; they do not establish Apple's
+server specification. The caller's response bound must be 1–128 KiB. At most
+32 caller headers and 32 KiB of header names/values plus `: ` and CRLF are
+accepted. Header names use ASCII letters/digits/hyphen/underscore, values use
+printable ASCII, and all duplicate names are rejected case-insensitively.
+Routing, framing, compression and challenge-control headers are refused.
+
+TLS explicitly uses rustls and WebPKI roots with SNI, certificate and hostname
+verification enabled. GSA retains its separate Apple Root policy and unchanged
+three-URL allowlist. Redirects, proxies, challenge responses, connection pooling
+and optional automatic headers are disabled. The current locked ureq feature
+graph has no cookies or decompression; ureq supplies required Host and
+Content-Length framing from the validated URL/body. Each send makes at most
+one exchange with no retry and enforces both per-exchange and overall deadlines.
+Calling the production exchange directly still enforces the same request bounds
+and a positive, representable timeout.
+
+The response reader allocates one bounded zeroizing buffer and rejects oversized
+or late results. HTTP 401 returns once without obtaining a body reader or
+answering a challenge; redirects and proxy challenges fail without reading
+bodies. HTTP 200 content remains opaque for the protocol API to interpret.
+Errors use fixed descriptions and never include header/body/library error text.
+Coffer-owned request values and response bodies are zeroized; zeroization of
+ureq/rustls-owned buffers is not guaranteed.
+
+No Apple endpoint, other live endpoint, account, Secret Service item, or
+proprietary support library was accessed to validate this adapter. Server
+acceptance of the request profile, identifier binding, token lifetime/rotation,
+and registration/consent effects remain unknown. A timeout after transmission
+leaves issuance unknown. Integration, independent review and a separate explicit
+live plan are still required before any live attempt.

@@ -25,7 +25,7 @@ use base64::Engine as _;
 use quick_xml::{Reader, events::Event};
 use zeroize::Zeroizing;
 
-pub(super) const MAX_BODY: usize = 128 * 1024;
+pub(crate) const MAX_BODY: usize = 128 * 1024;
 pub(super) const MAX_DATA: usize = 64 * 1024;
 const MAX_STRING: usize = 4096;
 const MAX_KEY: usize = 256;
@@ -33,7 +33,7 @@ const MAX_DEPTH: usize = 8;
 const MAX_ELEMENTS: usize = 512;
 const DOCTYPE: &str = "!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"";
 
-pub(super) enum Value {
+pub(crate) enum Value {
     Dict(Vec<(Zeroizing<String>, Value)>),
     Array(Vec<Value>),
     Text(Zeroizing<String>),
@@ -49,7 +49,7 @@ impl Value {
             _ => Err(Error::Malformed),
         }
     }
-    pub(super) fn get(&self, key: &str) -> Result<&Self, Error> {
+    pub(crate) fn get(&self, key: &str) -> Result<&Self, Error> {
         self.dict()?
             .iter()
             .find(|(k, _)| k.as_str() == key)
@@ -63,13 +63,13 @@ impl Value {
             .find(|(k, _)| k.as_str() == key)
             .map(|(_, v)| v))
     }
-    pub(super) fn text(&self) -> Result<&str, Error> {
+    pub(crate) fn text(&self) -> Result<&str, Error> {
         match self {
             Self::Text(v) => Ok(v),
             _ => Err(Error::Malformed),
         }
     }
-    pub(super) fn integer(&self) -> Result<i64, Error> {
+    pub(crate) fn integer(&self) -> Result<i64, Error> {
         match self {
             Self::Integer(v) => v.parse().map_err(|_| Error::Malformed),
             _ => Err(Error::Malformed),
@@ -427,7 +427,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub(super) fn parse_at(bytes: &[u8], stage: ResponseStage) -> Result<Value, Error> {
+pub(crate) fn parse_at(bytes: &[u8], stage: ResponseStage) -> Result<Value, Error> {
     parse_document(bytes, stage, false)
 }
 

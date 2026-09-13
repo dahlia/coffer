@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 mod wire;
-mod xml;
+pub(crate) mod xml;
 
 /// The only independently evidenced service in this initial implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

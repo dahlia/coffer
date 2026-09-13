@@ -454,8 +454,9 @@ their source code must be treated as reference-only unless their licensing
 situation changes:
 
  -  [`OpenBubbles/rustpush`], currently under SSPL; and
- -  [`Sank6/iCloud-Keychain-for-Linux`], whose repository does not currently
-    grant Coffer a license to copy its implementation.
+ -  [`Sank6/iCloud-Keychain-for-Linux`], which now declares an [MIT license]
+    but also documents [rustpush-derived components]. Coffer has not cleared
+    those components' source provenance for incorporation.
 
 Do not copy, paste, translate, mechanically port, or adapt source code from a
 reference-only implementation into Coffer.
@@ -479,6 +480,8 @@ behavior came from without reconstructing the entire research process.
 
 [`OpenBubbles/rustpush`]: https://github.com/OpenBubbles/rustpush
 [`Sank6/iCloud-Keychain-for-Linux`]: https://github.com/Sank6/iCloud-Keychain-for-Linux
+[MIT license]: https://github.com/Sank6/iCloud-Keychain-for-Linux/blob/62de50adb39c791d00955394e7e03c7ccceb1c00/LICENSE.md
+[rustpush-derived components]: https://github.com/Sank6/iCloud-Keychain-for-Linux/blob/62de50adb39c791d00955394e7e03c7ccceb1c00/README.md
 
 
 AI-assisted development

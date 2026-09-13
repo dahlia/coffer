@@ -49,7 +49,9 @@
 //! usable session.  Sibling crates provide local anisette generation, the
 //! concrete developer-harness transport, and Linux Secret Service storage so
 //! those platform concerns do not enter this runtime-neutral protocol layer.
-//! Stored-session service-token issuance lives in [`tokens`]. The [`ckks`]
+//! Stored-session service-token issuance lives in [`tokens`]. Explicit legacy
+//! PET-to-delegate token issuance lives in [`delegate`], with offline fixtures
+//! and no live compatibility guarantee. The [`ckks`]
 //! module provides offline key unwrapping and bounded key-hierarchy validation
 //! using a caller-supplied anchor; it does not establish anchor trust. The
 //! [`octagon`] module provides offline P-384 key encodings and ECDSA/SHA-384
@@ -60,6 +62,7 @@
 pub mod anisette;
 pub mod auth;
 pub mod ckks;
+pub mod delegate;
 pub mod entropy;
 pub mod octagon;
 pub mod pki;

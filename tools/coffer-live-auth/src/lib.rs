@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anisette;
+pub mod delegate_transport;
 pub mod entropy;
 pub mod flow;
 pub mod harness;

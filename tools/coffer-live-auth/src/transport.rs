@@ -166,7 +166,7 @@ impl Deadlines {
         }
     }
 
-    fn remaining(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn remaining(&self, now: Instant) -> Option<Duration> {
         let until_overall = self.overall.checked_duration_since(now)?;
         if until_overall.is_zero() || self.per_exchange.is_zero() {
             return None;
@@ -418,7 +418,7 @@ impl fmt::Debug for UreqExchange {
 }
 
 /// Maps a `ureq` failure onto the protocol's vocabulary with fixed text.
-fn classify_ureq_error(error: &ureq::Error, limit: usize) -> TransportError {
+pub(crate) fn classify_ureq_error(error: &ureq::Error, limit: usize) -> TransportError {
     match error {
         ureq::Error::Timeout(_) => TransportError::Timeout,
         ureq::Error::Tls(_) | ureq::Error::Rustls(_) => TransportError::Tls {

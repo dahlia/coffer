@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>apple-id</key><string>synthetic&amp;&lt;&quot;&apos;&gt;@example.invalid</string><key>password</key><string>SYNTHETIC:PET&lt;&amp;&quot;&apos;&gt;</string><key>delegates</key><dict><key>com.apple.mobileme</key><dict/></dict><key>client-id</key><string>synthetic&lt;&amp;&quot;&apos;&gt;-client</string></dict></plist>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>status</key><integer>0</integer>
+<key>dsid</key><string>000123-synthetic-dsid</string>
+<key>delegates</key><dict><key>com.apple.mobileme</key><dict>
+<key>status</key><integer>0</integer>
+<key>service-data</key><dict><key>tokens</key><dict>
+<key>mmeAuthToken</key><string>SYNTHETIC-MME-TOKEN</string>
+<key>cloudKitToken</key><string>SYNTHETIC-CLOUDKIT-TOKEN</string>
+<key>ignoredToken</key><string>SYNTHETIC-IGNORED-TOKEN</string>
+</dict></dict></dict></dict>
+<key>ignoredURL</key><string>https://example.invalid/never-connect</string>
+</dict></plist>
