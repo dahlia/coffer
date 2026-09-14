@@ -299,10 +299,10 @@ fn op_command() -> Command {
         "--cache=false",
         "--format",
         "human-readable",
-        "--encoding",
-        "UTF-8",
         "--no-color",
     ]);
+    // UTF-8 is the CLI default. op 2.39.0 rejects an explicit UTF-8 encoding
+    // override before command execution; only legacy encodings use that flag.
     // Keep GUI integration variables inherited without reading their values or
     // creating any secret environment. Explicit flags pin output/debug/cache.
     command

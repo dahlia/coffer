@@ -243,8 +243,6 @@ fn production_command_has_only_fixed_nonsecret_arguments_and_no_env_assignments(
             "--cache=false",
             "--format",
             "human-readable",
-            "--encoding",
-            "UTF-8",
             "--no-color",
         ]
     );

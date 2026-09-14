@@ -328,17 +328,19 @@ label listed below, starts a single child process with this fixed argument
 vector:
 
 ~~~~ text
-/usr/bin/op item get - --fields label=username,label=password --reveal --debug=false --cache=false --format human-readable --encoding UTF-8 --no-color
+/usr/bin/op item get - --fields label=username,label=password --reveal --debug=false --cache=false --format human-readable --no-color
 ~~~~
 
 Only the selector and one LF go to the child's stdin pipe, which is then
 closed. The expected account stays in the wrapper. Child stdout has a separate
 bounded pipe; stderr goes to the null device. GUI integration environment is
 inherited without reading its values or creating secret variables. Explicit
-flags pin formatting, encoding, color, cache, and debug behavior. The adapter
-never starts a sign-in, fallback, or second fetch. A fixed notice explains that
-unlock or approval may require human interaction in the 1Password application;
-a failure returns control.
+flags pin formatting, color, cache, and debug behavior. UTF-8 is the CLI
+default; do not pass `--encoding UTF-8`. Installed CLI 2.39.0 rejects that
+explicit value even for the account-free `op completion bash` command. The
+adapter never starts a sign-in, fallback, or second fetch. A fixed notice
+explains that unlock or approval may require human interaction in the 1Password
+application; a failure returns control.
 
 The [1Password item-command documentation] describes combined `username` and
 `password` selection as CSV. The adapter accepts exactly one row containing
