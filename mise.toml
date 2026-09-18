@@ -141,6 +141,11 @@ run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-
 description = "Build the isolated first-login 1Password harness and existing-state helper"
 run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-login-op"
 
+# Build only; a separately confirmed private-pipe lookup never contacts Apple.
+[tasks.build-op-diagnose]
+description = "Build the private 1Password lookup diagnostic without running it"
+run = "cargo build --locked -p coffer-live-auth --bin coffer-op-diagnose"
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

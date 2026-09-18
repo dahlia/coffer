@@ -28,6 +28,7 @@ use rustix::fs::{FileType, OFlags, fcntl_getfl, fcntl_setfl, fstat};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -37,6 +38,7 @@ const MAX_EXPECTED_ACCOUNT_LEN: usize = 256;
 const MAX_FRAME_LEN: usize = SELECTOR_LEN + 1 + MAX_EXPECTED_ACCOUNT_LEN + 1;
 // Two maximally quoted/escaped fields, comma, and one optional LF.
 const MAX_OUTPUT_LEN: usize = 4 * MAX_INPUT_LEN + 6;
+const MAX_STDERR_LEN: usize = 16 * 1024;
 const SELECTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const OP_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -65,7 +67,12 @@ pub enum OpInputError {
     /// Child output exceeded the encoded size bound.
     TooLarge,
     /// The child returned a non-success exit status.
-    Exit,
+    Exit {
+        /// OS-reported status, without assigning a cause to numeric codes.
+        termination: OpTermination,
+        /// Allowlisted text hint, never proof of the failure's cause.
+        hint: OpStderrHint,
+    },
     /// Output was not one supported CSV row containing two acceptable fields.
     Malformed,
     /// The decoded first field did not byte-exactly match the approved account.
@@ -81,9 +88,7 @@ impl OpInputError {
             Self::Interrupted => "1Password input interrupted; no retry",
             Self::Timeout => "1Password input deadline exceeded; no retry",
             Self::TooLarge => "1Password output exceeded the bound; no retry",
-            Self::Exit => {
-                "1Password process failed; unlock may require human interaction; no retry"
-            }
+            Self::Exit { .. } => "1Password process failed; cause not established; no retry",
             Self::Malformed => "1Password output rejected; no retry",
             Self::AccountMismatch => "1Password account binding rejected; no retry",
         }
@@ -91,10 +96,89 @@ impl OpInputError {
 }
 impl fmt::Display for OpInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
+        f.write_str(self.label())?;
+        if let Self::Exit { termination, hint } = self {
+            write!(f, "; termination={termination:?}; {}", hint.label())?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for OpInputError {}
+
+/// OS exit metadata only; numeric values do not identify an upstream cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpTermination {
+    /// Ordinary exit code supplied by the operating system.
+    Code(i32),
+    /// Signal reported by the operating system for the direct child.
+    Signal(i32),
+    /// Neither a code nor a terminating signal was available.
+    Unknown,
+}
+
+/// A fixed hint from private stderr, never a verified diagnosis.
+///
+/// The allowlist comes from 1Password's app-integration troubleshooting page:
+/// <https://www.1password.dev/cli/app-integration>, checked 2026-09-18.
+/// Text can be misleading or embedded in private values. No hint authorizes
+/// a retry, unlock, sign-in, configuration change, or any other action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpStderrHint {
+    /// No unique recognized marker; no cause is inferred.
+    Unknown,
+    /// The documented `LostConnectionToApp` marker appeared.
+    LostConnectionToApp,
+    /// The documented `connectionreset` marker appeared.
+    ConnectionReset,
+    /// The documented no-accounts-configured phrase appeared.
+    NoAccountsConfigured,
+}
+impl OpStderrHint {
+    /// Returns a literal that distinguishes a text hint from a diagnosis.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "stderr hint: unknown; cause not established",
+            Self::LostConnectionToApp => "stderr hint: LostConnectionToApp; cause not established",
+            Self::ConnectionReset => "stderr hint: connectionreset; cause not established",
+            Self::NoAccountsConfigured => {
+                "stderr hint: no accounts configured; cause not established"
+            }
+        }
+    }
+}
+
+fn stderr_hint(bytes: &[u8]) -> OpStderrHint {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return OpStderrHint::Unknown;
+    };
+    let mut found = None;
+    for (marker, hint) in [
+        ("LostConnectionToApp", OpStderrHint::LostConnectionToApp),
+        ("connectionreset", OpStderrHint::ConnectionReset),
+        (
+            "No accounts configured for use with 1Password CLI",
+            OpStderrHint::NoAccountsConfigured,
+        ),
+    ] {
+        // Match case-sensitive whole tokens/phrases, not arbitrary substrings.
+        // Multiple different markers remain ambiguous, even in valid UTF-8.
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if text.match_indices(marker).any(|(start, _)| {
+            !text[..start].chars().next_back().is_some_and(is_word)
+                && !text[start + marker.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_word)
+        }) {
+            if found.is_some() {
+                return OpStderrHint::Unknown;
+            }
+            found = Some(hint);
+        }
+    }
+    found.unwrap_or(OpStderrHint::Unknown)
+}
 
 /// Opaque item selector and approved account in zeroizing memory, without `Debug`.
 ///
@@ -309,7 +393,7 @@ fn op_command() -> Command {
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
 }
 
@@ -325,6 +409,87 @@ impl Drop for ChildOwner {
 fn fetch(selector: &ItemSelector) -> Result<Credentials, OpInputError> {
     let output = run_child(&mut op_command(), selector, OP_TIMEOUT)?;
     decode_csv(&output)
+}
+
+const DIAGNOSTIC_CONFIRM: &str = "Type DIAGNOSE OP to authorize one 1Password credential fetch, validation and immediate discard; no Apple or storage access: ";
+
+/// Fixed failures of the standalone credential-fetch diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpDiagnosticError {
+    /// The separate diagnostic confirmation was not accepted.
+    Declined,
+    /// The controlling terminal could not complete confirmation.
+    Confirmation,
+    /// One fetch or its account/CSV validation failed, with no retry.
+    Input(OpInputError),
+}
+impl fmt::Display for OpDiagnosticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Declined => f.write_str("1Password diagnostic declined; no credential fetch"),
+            Self::Confirmation => {
+                f.write_str("1Password diagnostic confirmation failed; no credential fetch")
+            }
+            Self::Input(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for OpDiagnosticError {}
+
+/// Confirms one credential fetch, validates it, then wipes all owned input.
+///
+/// This is the sole operation of `coffer-op-diagnose`. The caller must supply
+/// the controlling TTY and the existing private selector/approved-account frame.
+/// Only the exact separate `DIAGNOSE OP` confirmation permits a single fetch.
+/// CSV validation and byte-exact account binding precede success; credentials
+/// are dropped and zeroized before this function returns. No credentials or
+/// raw stderr escape in the result, including on failure.
+/// Signal termination can skip Rust destructors; it does not guarantee a wipe
+/// of every live buffer, including the selector/account frame or a pending
+/// stdout result.
+///
+/// This function has no Apple, anisette, profile, or storage operations and
+/// never retries. Running it still requires separate authorization to access
+/// 1Password; the CLI can communicate with its own app/services.
+///
+/// # Errors
+/// Decline/terminal failures perform no fetch. Fetch, size, deadline, process,
+/// CSV and account errors stop once, retaining only fixed error metadata.
+pub fn diagnose(
+    terminal: &mut impl SecureTerminal,
+    selector: ItemSelector,
+) -> Result<(), OpDiagnosticError> {
+    diagnose_with_loader(terminal, selector, fetch)
+}
+
+fn diagnose_with_loader(
+    terminal: &mut impl SecureTerminal,
+    selector: ItemSelector,
+    loader: impl FnOnce(&ItemSelector) -> Result<Credentials, OpInputError>,
+) -> Result<(), OpDiagnosticError> {
+    let answer = terminal
+        .prompt_visible(DIAGNOSTIC_CONFIRM)
+        .map_err(|_| OpDiagnosticError::Confirmation)?;
+    if answer.as_str() != "DIAGNOSE OP" {
+        return Err(OpDiagnosticError::Declined);
+    }
+    drop(answer);
+    let credentials = loader(&selector)
+        .and_then(|credentials| validate_binding(credentials, &selector))
+        .map_err(OpDiagnosticError::Input)?;
+    drop(credentials);
+    drop(selector);
+    Ok(())
+}
+
+fn validate_binding(
+    credentials: Credentials,
+    selector: &ItemSelector,
+) -> Result<Credentials, OpInputError> {
+    if credentials.username.as_bytes() != selector.expected_account() {
+        return Err(OpInputError::AccountMismatch);
+    }
+    Ok(credentials)
 }
 fn run_child(
     command: &mut Command,
@@ -368,14 +533,88 @@ fn read_child(
     drop(input); // EOF is mandatory; op must never ask this pipe for a password.
     let mut output = child.stdout.take().ok_or(OpInputError::Process)?;
     let _output_mode = Nonblocking::new(&output)?;
-    let bytes = read_bounded(&mut output, MAX_OUTPUT_LEN, deadline, signals)?;
+    let mut stderr = child.stderr.take().ok_or(OpInputError::Process)?;
+    let _stderr_mode = Nonblocking::new(&stderr)?;
+    let mut bytes = PrivatePipe::new(MAX_OUTPUT_LEN);
+    let mut errors = PrivatePipe::new(MAX_STDERR_LEN);
     loop {
         check_deadline(deadline, signals)?;
-        match child.try_wait().map_err(|_| OpInputError::Process)? {
-            Some(status) if status.success() => return Ok(bytes),
-            Some(_) => return Err(OpInputError::Exit),
-            None => std::thread::sleep(POLL_INTERVAL),
+        let output_progress = bytes.read_once(&mut output)?;
+        check_deadline(deadline, signals)?;
+        let stderr_progress = errors.read_once(&mut stderr)?;
+        check_deadline(deadline, signals)?;
+        if bytes.eof
+            && errors.eof
+            && let Some(status) = child.try_wait().map_err(|_| OpInputError::Process)?
+        {
+            check_deadline(deadline, signals)?;
+            if status.success() {
+                // Success stderr is private too. Never return it or its hints.
+                return Ok(bytes.into_bytes());
+            }
+            let termination = match (status.code(), status.signal()) {
+                (Some(code), _) => OpTermination::Code(code),
+                (_, Some(signal)) => OpTermination::Signal(signal),
+                _ => OpTermination::Unknown,
+            };
+            return Err(OpInputError::Exit {
+                termination,
+                hint: stderr_hint(&errors.bytes[..errors.used]),
+            });
         }
+        if !output_progress && !stderr_progress {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+// No Debug, strings, growing allocations, or raw I/O errors. One bounded
+// nonblocking read per pipe per loop keeps neither writer waiting on the other.
+struct PrivatePipe {
+    bytes: Zeroizing<Vec<u8>>,
+    used: usize,
+    eof: bool,
+}
+impl PrivatePipe {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Zeroizing::new(vec![0; limit + 1]),
+            used: 0,
+            eof: false,
+        }
+    }
+
+    fn read_once(&mut self, reader: &mut impl Read) -> Result<bool, OpInputError> {
+        if self.eof {
+            return Ok(false);
+        }
+        match reader.read(&mut self.bytes[self.used..]) {
+            Ok(0) => {
+                self.eof = true;
+                Ok(true)
+            }
+            Ok(n) => {
+                self.used += n;
+                if self.used == self.bytes.len() {
+                    return Err(OpInputError::TooLarge);
+                }
+                Ok(true)
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(_) => Err(OpInputError::Process),
+        }
+    }
+
+    fn into_bytes(mut self) -> Zeroizing<Vec<u8>> {
+        self.bytes.truncate(self.used);
+        self.bytes
     }
 }
 
@@ -552,15 +791,13 @@ impl<T: SecureTerminal> SecureTerminal for OpTerminal<T> {
                 let selector = self.selector.take().ok_or_else(|| self.fail())?;
                 let loader = self.loader.take().ok_or_else(|| self.fail())?;
                 let credentials = loader(&selector)
-                    .and_then(|credentials| {
-                        if credentials.username.as_bytes() != selector.expected_account() {
-                            return Err(OpInputError::AccountMismatch);
-                        }
-                        Ok(credentials)
-                    })
+                    .and_then(|credentials| validate_binding(credentials, &selector))
                     .map_err(|error| {
                         self.fail();
                         let _ = self.terminal.notice(error.label());
+                        if let OpInputError::Exit { hint, .. } = error {
+                            let _ = self.terminal.notice(hint.label());
+                        }
                         TerminalError::Io
                     })?;
                 self.password = Some(credentials.password);

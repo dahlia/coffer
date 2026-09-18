@@ -38,7 +38,8 @@
 //!   argument at all.
 //! - Every network step runs once.  A failure ends the run with a static,
 //!   stage-labelled error; the user decides whether to run again.
-//! - Output consists of string literals.  No account, token, code, header,
+//! - Output consists of string literals, plus OS exit codes/signals in the
+//!   standalone 1Password diagnostic. No account, token, code, header,
 //!   body, slot, or path is ever printed.
 //! - Nothing here falls back: no remote anisette provider, no plaintext
 //!   session file, no proxy, no redirect.
@@ -128,6 +129,7 @@ mod tests {
             ("first_login.rs", include_str!("first_login.rs")),
             ("login_op_main.rs", include_str!("login_op_main.rs")),
             ("op_input.rs", include_str!("op_input.rs")),
+            ("op_diagnose_main.rs", include_str!("op_diagnose_main.rs")),
             ("slot.rs", include_str!("slot.rs")),
             ("store.rs", include_str!("store.rs")),
             ("terminal.rs", include_str!("terminal.rs")),

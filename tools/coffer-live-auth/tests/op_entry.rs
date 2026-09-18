@@ -53,3 +53,56 @@ fn first_login_refuses_missing_extra_or_private_arguments_before_tty_or_state() 
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn diagnostic_rejects_arguments_before_tty_or_credential_access() {
+    let output = Command::new(env!("CARGO_BIN_EXE_coffer-op-diagnose"))
+        .arg("synthetic-private")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"coffer-op-diagnose takes no arguments\n");
+}
+
+#[test]
+fn diagnostic_entry_has_no_apple_storage_or_anisette_path() {
+    // Pin the production composition alongside behavior tests of the generic
+    // diagnostic function. No test invokes the real lookup or a real account.
+    let source = include_str!("../src/op_diagnose_main.rs");
+    assert!(source.contains("op_input::diagnose(&mut terminal, selector)"));
+    for forbidden in [
+        "run_login",
+        "first_login",
+        "delegate_harness",
+        "SlotState",
+        "SessionStore",
+        "Anisette",
+        "Bootstrap",
+        "Transport",
+        "Command::",
+    ] {
+        assert!(!source.contains(forbidden));
+    }
+    let input = include_str!("../src/op_input.rs");
+    assert!(input.contains("diagnose_with_loader(terminal, selector, fetch)"));
+    let body = input
+        .split("fn diagnose_with_loader(")
+        .nth(1)
+        .unwrap()
+        .split("fn validate_binding(")
+        .next()
+        .unwrap();
+    for forbidden in [
+        "run_login",
+        "store::",
+        "anisette::",
+        "transport::",
+        "harness::",
+        "Command::",
+        "fetch(",
+    ] {
+        assert!(!body.contains(forbidden));
+    }
+}

@@ -333,14 +333,14 @@ vector:
 
 Only the selector and one LF go to the child's stdin pipe, which is then
 closed. The expected account stays in the wrapper. Child stdout has a separate
-bounded pipe; stderr goes to the null device. GUI integration environment is
-inherited without reading its values or creating secret variables. Explicit
-flags pin formatting, color, cache, and debug behavior. UTF-8 is the CLI
-default; do not pass `--encoding UTF-8`. Installed CLI 2.39.0 rejects that
-explicit value even for the account-free `op completion bash` command. The
-adapter never starts a sign-in, fallback, or second fetch. A fixed notice
-explains that unlock or approval may require human interaction in the 1Password
-application; a failure returns control.
+bounded pipe; stderr has its own private bounded pipe. GUI integration
+environment is inherited without reading its values or creating secret
+variables. Explicit flags pin formatting, color, cache, and debug behavior.
+UTF-8 is the CLI default; do not pass `--encoding UTF-8`. Installed CLI 2.39.0
+rejects that explicit value even for the account-free `op completion bash`
+command. The adapter never starts a sign-in, fallback, or second fetch. A fixed
+notice explains that unlock or approval may require human interaction in the
+1Password application; a failure returns control.
 
 The [1Password item-command documentation] describes combined `username` and
 `password` selection as CSV. The adapter accepts exactly one row containing
@@ -358,12 +358,19 @@ one fetch, zero Apple authentication calls, and no fallback or retry. It does
 not trim, case-fold, or normalize either account value.
 
 A 120-second budget covers child output and exit, starting before spawn. The
-pipes are nonblocking, with deadline checks between reads and waits. The child
+pipes are nonblocking, with deadline checks between reads and waits. Each loop
+reads stdout and stderr once so either writer can progress. Stderr is capped
+at 16 KiB plus one overflow probe; exceeding either pipe limit stops the child,
+even if its exit status would be successful. Both EOFs and a successful exit
+are required before stdout can be accepted. The child
 owner kills and reaps the direct child on failure, including timeout or excess
-output. Valid bytes are accepted only after a successful exit. Error labels
-contain no child output, exit text, arbitrary source error, or identifying data.
-Normal process scheduling and kernel termination/reaping still apply; this is
-not a sandbox for a compromised CLI or its descendants.
+output. Valid bytes are accepted only after a successful exit. Errors retain
+only fixed categories, OS exit-code/signal metadata, and the allowlisted stderr
+hints described below. They contain no child output, arbitrary source error, or
+identifying data. Stderr is zeroized on every path, including success;
+successful stderr never supplies a hint. Normal process scheduling and kernel
+termination/reaping still apply; this is not a sandbox for a compromised CLI or
+its descendants.
 
 [1Password item-command documentation]: https://www.1password.dev/cli/reference/management-commands/item
 
@@ -511,3 +518,76 @@ decline/cancellation, each authentication failure without retry, both 2FA
 branches, original-profile preservation, concurrent reservation, invalid paths
 and modes, last-moment session occupancy, and reload over a new connection.
 They use only synthetic input, fake login steps and an in-memory store.
+
+
+1Password diagnostic only: offline implementation
+-------------------------------------------------
+
+`coffer-op-diagnose` performs one separately confirmed 1Password fetch,
+validates CSV and the independently approved account binding, then immediately
+drops and zeroizes the selector, account, password and encoded output before
+reporting. It takes no arguments and reuses the existing anonymous stdin
+selector/account frame. It opens the controlling TTY and requires exactly
+`DIAGNOSE OP` before fetching. Decline or terminal failure fetches nothing. No
+diagnostic result contains credentials; success means only that this fetch
+passed local validation.
+
+The entry point calls only the terminal and `op_input::diagnose` APIs. It never
+opens a Coffer profile, connects to Secret Service, loads anisette or Apple
+libraries, or creates an Apple transport. There is no login, token request,
+local storage operation or retry. Its crate shares dependencies with the live
+harnesses, but the diagnostic call path does not invoke those adapters. The
+1Password CLI itself can contact its application/services and can require human
+approval; this is a credential access operation, not an offline command. The
+implementation and fake-process tests do not authorize executing it. A live run
+requires separate approval and the exact TTY confirmation.
+
+Build the binary without executing the lookup:
+
+~~~~ sh
+mise run build-op-diagnose
+~~~~
+
+Build/test/CI never invoke the live diagnostic lookup. No
+existing launcher binding, account, item, transcript, or real credential was
+read during implementation.
+
+### Fixed failure metadata and provenance
+
+A nonzero exit now reports that the process failed and the cause is not
+established. It does not presume that 1Password is locked. The standalone
+report includes an OS exit code or terminating signal, without interpreting
+numeric values as 1Password error codes. Timeouts, interruptions, pipe errors,
+size limits, malformed CSV and account mismatch remain separate fixed errors.
+
+The only stderr markers recognized are `LostConnectionToApp`, `connectionreset`
+and `No accounts configured for use with 1Password CLI`. These names/words come
+from the troubleshooting section of the
+[official app-integration documentation], checked on 18 September 2026.
+Matching is case-sensitive and requires word boundaries around the whole
+marker/phrase. Only one distinct marker produces a fixed `OpStderrHint`; empty,
+invalid UTF-8, unrecognized or ambiguous stderr returns `Unknown`. No other
+text is emitted or retained in an error. A marker can appear in unrelated text
+or a private value, so every label explicitly says it is a hint and that the
+cause is not established. Hints never select a follow-up action or retry. This
+allowlist does not claim that every CLI version emits these strings or that
+every occurrence is an error of the same cause.
+
+The tests construct synthetic marker envelopes and local fake processes. They
+are not upstream message fixtures, captured 1Password output, or evidence of
+live compatibility. Tests cover simultaneous pipe progress, a full stderr pipe
+before stdout, independent limits and overflow probes, unknown and ambiguous
+hints, exit/signal metadata, successful stderr privacy, timeouts and child
+reaping, parent-only cancellation, separate confirmation, CSV/account rejection,
+and the diagnostic entry point's restricted composition. The previous discarded
+stderr cannot be recovered or used to diagnose the earlier failure.
+
+Coffer-owned buffers are zeroized when their Rust owners are dropped on
+ordinary return. Signal termination does not unwind Rust stacks and can skip
+destructors, so it does not guarantee a wipe of every live buffer, including
+the selector/account frame or a pending stdout result. Kernel pipes,
+allocations in the CLI, other abrupt termination, and a compromised CLI or its
+descendants are also outside this guarantee. Raw stderr is never printed,
+logged, placed in `Debug` or errors, or written to a diagnostic file.
+
+[official app-integration documentation]: https://www.1password.dev/cli/app-integration

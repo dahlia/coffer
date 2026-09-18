@@ -89,7 +89,7 @@ fn fake_command(script: &str) -> Command {
         .args(["-c", script])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
 }
 
@@ -250,7 +250,7 @@ fn production_command_has_only_fixed_nonsecret_arguments_and_no_env_assignments(
 }
 
 #[test]
-fn child_receives_selection_only_via_stdin_then_eof_and_stderr_is_discarded() {
+fn child_receives_selection_only_via_stdin_then_eof_and_stderr_stays_private() {
     let _serial = crate::terminal::tests::SIGNAL_TESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -259,7 +259,7 @@ fn child_receives_selection_only_via_stdin_then_eof_and_stderr_is_discarded() {
         IFS= read -r selected || exit 2
         [ "$selected" = abcdefghijklmnopqrstuvwxyz ] || exit 3
         if IFS= read -r extra; then exit 4; fi
-        printf 'synthetic-sensitive-stderr' >&2
+        printf 'synthetic-sensitive-stderr [LostConnectionToApp]' >&2
         printf 'synthetic@example.invalid,"p,a"\n'
     "#,
     );
@@ -278,7 +278,7 @@ fn valid_output_with_nonzero_exit_is_rejected() {
     let mut command = fake_command("read selected; printf 'synthetic,password\\n'; exit 7");
     assert_eq!(
         run_child(&mut command, &selector(), Duration::from_secs(2)).unwrap_err(),
-        OpInputError::Exit
+        exit_error(7)
     );
 }
 
@@ -302,7 +302,7 @@ fn cancellation_child_role() {
     device.disable_echo().unwrap();
     device.restore_echo().unwrap();
     let mut command = fake_command(
-        "read selected; if [ \"$2\" = closed ]; then exec 1>&-; fi; printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60",
+        "read selected; if [ \"$2\" = closed ]; then exec 1>&- 2>&-; fi; if [ \"$2\" = stderr-open ]; then exec 1>&-; fi; printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60",
     );
     command
         .arg("synthetic-op")
@@ -318,8 +318,8 @@ fn parent_only_sigterm_kills_and_reaps_op_before_default_termination() {
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
     use std::os::unix::process::ExitStatusExt;
 
-    // Exercise both polling phases: reading stdout and waiting after EOF.
-    for stdout in ["open", "closed"] {
+    // Exercise stdout, stderr alone, and waiting for exit after both EOFs.
+    for stdout in ["open", "stderr-open", "closed"] {
         let directory = tempfile::tempdir().unwrap();
         let pid_path = directory.path().join("synthetic-child-pid");
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
@@ -394,8 +394,16 @@ fn timeout_and_oversize_kill_and_reap_the_owned_child() {
             OpInputError::TooLarge,
         ),
         (
+            "read selected; exec 1>&- 2>&-; exec /bin/sleep 60",
+            OpInputError::Timeout,
+        ),
+        (
             "read selected; exec 1>&-; exec /bin/sleep 60",
             OpInputError::Timeout,
+        ),
+        (
+            "read selected; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&2; done",
+            OpInputError::TooLarge,
         ),
     ] {
         let mut child = ChildOwner(fake_command(script).spawn().unwrap());
@@ -464,7 +472,7 @@ fn terminal(fail_fetch: bool) -> (OpTerminal<ScriptTerminal>, Rc<Cell<usize>>) {
     terminal.loader = Some(Box::new(move |_| {
         called.set(called.get() + 1);
         if fail_fetch {
-            return Err(OpInputError::Exit);
+            return Err(exit_error(7));
         }
         decode_csv(b"synthetic@example.invalid,synthetic-password\n")
     }));
@@ -951,4 +959,243 @@ fn first_login_confirmation_is_separate_and_reuses_password_then_wipes() {
         assert!(terminal.prompt_hidden(ACCOUNT).is_err());
         assert_eq!(fetched.get(), 0);
     }
+}
+
+#[test]
+fn generic_exit_does_not_guess_unlock() {
+    assert!(!exit_error(7).label().contains("unlock"));
+}
+
+#[test]
+fn stderr_at_bound_before_stdout_does_not_deadlock() {
+    let mut command = fake_command(
+        "read selected; i=0; while [ $i -lt 512 ]; do printf 0123456789abcdef0123456789abcdef >&2; i=$((i+1)); done; printf 'synthetic@example.invalid,password\\n'",
+    );
+    command.stderr(Stdio::piped());
+    let mut child = ChildOwner(command.spawn().unwrap());
+    let result = read_child(
+        &mut child.0,
+        &selector(),
+        Instant::now() + Duration::from_secs(2),
+        None,
+    );
+    assert!(
+        result.is_ok(),
+        "bounded stderr must be drained alongside stdout"
+    );
+}
+
+#[test]
+fn stderr_overflow_is_rejected_even_when_stdout_is_valid() {
+    let mut command = fake_command(
+        "read selected; printf 'synthetic@example.invalid,password\\n'; i=0; while [ $i -lt 513 ]; do printf 0123456789abcdef0123456789abcdef >&2; i=$((i+1)); done",
+    );
+    command.stderr(Stdio::piped());
+    let mut child = ChildOwner(command.spawn().unwrap());
+    let result = read_child(
+        &mut child.0,
+        &selector(),
+        Instant::now() + Duration::from_secs(2),
+        None,
+    );
+    assert_eq!(result.err(), Some(OpInputError::TooLarge));
+}
+
+fn exit_error(code: i32) -> OpInputError {
+    OpInputError::Exit {
+        termination: OpTermination::Code(code),
+        hint: OpStderrHint::Unknown,
+    }
+}
+
+#[test]
+fn stderr_hints_are_allowlisted_ambiguous_or_unknown_never_causes() {
+    // Synthetic envelopes, not captured upstream messages or fixtures.
+    for (marker, expected) in [
+        ("LostConnectionToApp", OpStderrHint::LostConnectionToApp),
+        ("connectionreset", OpStderrHint::ConnectionReset),
+        (
+            "No accounts configured for use with 1Password CLI",
+            OpStderrHint::NoAccountsConfigured,
+        ),
+    ] {
+        let synthetic = format!("synthetic-private-prefix [{marker}] synthetic-private-suffix");
+        assert_eq!(stderr_hint(synthetic.as_bytes()), expected);
+        assert!(expected.label().contains("hint:"));
+        assert!(expected.label().contains("cause not established"));
+        for unrelated in [
+            format!("prefix{marker}"),
+            format!("{marker}suffix"),
+            format!("é{marker}"),
+        ] {
+            assert_eq!(stderr_hint(unrelated.as_bytes()), OpStderrHint::Unknown);
+        }
+    }
+    for unknown in [
+        b"synthetic-sensitive-unlock-error".as_slice(),
+        b"LostConnectionToApp connectionreset",
+        b"LOSTCONNECTIONTOAPP",
+        b"\xff LostConnectionToApp",
+        b"",
+    ] {
+        assert_eq!(stderr_hint(unknown), OpStderrHint::Unknown);
+    }
+}
+
+#[test]
+fn failed_child_exposes_only_status_and_fixed_hint() {
+    for (script, termination, hint) in [
+        (
+            "read selected; printf 'synthetic-private [LostConnectionToApp] secret' >&2; exit 19",
+            OpTermination::Code(19),
+            OpStderrHint::LostConnectionToApp,
+        ),
+        (
+            "read selected; printf 'synthetic-private unlock secret' >&2; exit 23",
+            OpTermination::Code(23),
+            OpStderrHint::Unknown,
+        ),
+        (
+            "read selected; printf 'synthetic-private secret' >&2; kill -TERM $$",
+            OpTermination::Signal(15),
+            OpStderrHint::Unknown,
+        ),
+    ] {
+        let mut child = ChildOwner(fake_command(script).spawn().unwrap());
+        let result = read_child(
+            &mut child.0,
+            &selector(),
+            Instant::now() + Duration::from_secs(2),
+            None,
+        );
+        let error = result.err().unwrap();
+        assert_eq!(error, OpInputError::Exit { termination, hint });
+        let rendered = format!("{error:?} {error} {}", error.label());
+        for forbidden in ["synthetic-private", "secret", "unlock"] {
+            assert!(!rendered.contains(forbidden));
+        }
+    }
+}
+
+#[test]
+fn both_output_pipes_progress_and_keep_independent_caps() {
+    for script in [
+        "read selected; i=0; while [ $i -lt 128 ]; do printf 0123456789abcdef0123456789abcdef; printf 0123456789abcdef0123456789abcdef >&2; i=$((i+1)); done",
+        "read selected; exec 1>&-; printf synthetic-private >&2",
+        "read selected; exec 2>&-; printf synthetic-public",
+    ] {
+        let mut child = ChildOwner(fake_command(script).spawn().unwrap());
+        assert!(
+            read_child(
+                &mut child.0,
+                &selector(),
+                Instant::now() + Duration::from_secs(2),
+                None
+            )
+            .is_ok()
+        );
+    }
+    for limit in [MAX_OUTPUT_LEN, MAX_STDERR_LEN] {
+        let mut buffer = PrivatePipe::new(limit);
+        let mut source = Cursor::new(vec![b'x'; limit + 100]);
+        assert_eq!(buffer.read_once(&mut source), Err(OpInputError::TooLarge));
+        assert_eq!(source.position(), (limit + 1) as u64);
+        assert_eq!(buffer.bytes.capacity(), limit + 1);
+    }
+}
+
+#[test]
+fn private_pipe_sanitizes_io_errors() {
+    struct Failed;
+    impl Read for Failed {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic-secret"))
+        }
+    }
+    let error = PrivatePipe::new(32).read_once(&mut Failed).unwrap_err();
+    assert_eq!(error, OpInputError::Process);
+    assert!(!format!("{error:?} {error}").contains("synthetic-secret"));
+}
+
+struct DiagnosticTerminal {
+    answer: Result<Zeroizing<String>, TerminalError>,
+    prompts: usize,
+}
+impl SecureTerminal for DiagnosticTerminal {
+    fn notice(&mut self, _: &'static str) -> Result<(), TerminalError> {
+        Ok(())
+    }
+    fn prompt_visible(&mut self, label: &'static str) -> Result<Zeroizing<String>, TerminalError> {
+        assert_eq!(label, DIAGNOSTIC_CONFIRM);
+        self.prompts += 1;
+        std::mem::replace(&mut self.answer, Err(TerminalError::Io))
+    }
+    fn prompt_hidden(&mut self, _: &'static str) -> Result<Zeroizing<String>, TerminalError> {
+        panic!("diagnosis must never request a password or OTP")
+    }
+}
+
+#[test]
+fn diagnostic_confirmation_gates_one_fetch_and_never_returns_credentials() {
+    for answer in [
+        Ok("DIAGNOSE OP"),
+        Ok("LOGIN AND STORE"),
+        Ok("LOGIN AND ISSUE"),
+        Ok(""),
+        Err(TerminalError::Interrupted),
+    ] {
+        let accepted = answer == Ok("DIAGNOSE OP");
+        let mut terminal = DiagnosticTerminal {
+            answer: answer.map(|s| Zeroizing::new(s.to_owned())),
+            prompts: 0,
+        };
+        let mut calls = 0;
+        let result = diagnose_with_loader(&mut terminal, selector(), |_| {
+            calls += 1;
+            decode_csv(b"synthetic@example.invalid,synthetic-private-password\n")
+        });
+        assert_eq!(calls, usize::from(accepted));
+        assert_eq!(terminal.prompts, 1);
+        assert_eq!(result.is_ok(), accepted);
+        assert!(!format!("{result:?}").contains("synthetic"));
+    }
+}
+
+#[test]
+fn diagnostic_rejects_wrong_account_malformed_and_failed_fetch_without_retry() {
+    for (bytes, expected) in [
+        (
+            b"wrong@example.invalid,synthetic-private\n".as_slice(),
+            OpInputError::AccountMismatch,
+        ),
+        (
+            b"synthetic-private,synthetic@example.invalid\n",
+            OpInputError::AccountMismatch,
+        ),
+        (b"synthetic@example.invalid,\n", OpInputError::Malformed),
+        (b"synthetic-invalid-csv", OpInputError::Malformed),
+    ] {
+        let mut terminal = DiagnosticTerminal {
+            answer: Ok(Zeroizing::new("DIAGNOSE OP".to_owned())),
+            prompts: 0,
+        };
+        let mut calls = 0;
+        let result = diagnose_with_loader(&mut terminal, selector(), |_| {
+            calls += 1;
+            decode_csv(bytes)
+        });
+        assert_eq!(result, Err(OpDiagnosticError::Input(expected)));
+        assert_eq!(calls, 1);
+    }
+    let mut terminal = DiagnosticTerminal {
+        answer: Ok(Zeroizing::new("DIAGNOSE OP".to_owned())),
+        prompts: 0,
+    };
+    let mut calls = 0;
+    let result = diagnose_with_loader(&mut terminal, selector(), |_| {
+        calls += 1;
+        Err(exit_error(7))
+    });
+    assert_eq!(result, Err(OpDiagnosticError::Input(exit_error(7))));
+    assert_eq!(calls, 1);
 }
