@@ -56,6 +56,10 @@
 //! Passwords arrive through one bounded child pipe and OTP remains hidden TTY input.
 //! This opt-in exception does not change the original binaries' input contract.
 //!
+//! The separate `coffer-live-login-file` entry point uses [`file_input::FileTerminal`]
+//! for an explicitly approved disposable-account plaintext file after first-login
+//! confirmation. OTP stays on the TTY; this does not change any other entry point.
+//!
 //! # What the success report does and does not claim
 //!
 //! The M1 Secret Service line reports only that the reusable session
@@ -69,6 +73,7 @@ pub mod anisette;
 pub mod delegate_harness;
 pub mod delegate_transport;
 pub mod entropy;
+pub mod file_input;
 pub mod first_login;
 pub mod flow;
 pub mod harness;
@@ -126,6 +131,8 @@ mod tests {
             ("delegate_harness.rs", include_str!("delegate_harness.rs")),
             ("delegate_main.rs", include_str!("delegate_main.rs")),
             ("delegate_op_main.rs", include_str!("delegate_op_main.rs")),
+            ("file_input.rs", include_str!("file_input.rs")),
+            ("login_file_main.rs", include_str!("login_file_main.rs")),
             ("first_login.rs", include_str!("first_login.rs")),
             ("login_op_main.rs", include_str!("login_op_main.rs")),
             ("op_input.rs", include_str!("op_input.rs")),

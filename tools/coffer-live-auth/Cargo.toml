@@ -33,6 +33,10 @@ path = "src/login_op_main.rs"
 name = "coffer-op-diagnose"
 path = "src/op_diagnose_main.rs"
 
+[[bin]]
+name = "coffer-live-login-file"
+path = "src/login_file_main.rs"
+
 [dependencies]
 coffer-anisette = { path = "../../crates/coffer-anisette" }
 coffer-bootstrap = { path = "../../crates/coffer-bootstrap" }

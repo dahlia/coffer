@@ -146,6 +146,10 @@ run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-
 description = "Build the private 1Password lookup diagnostic without running it"
 run = "cargo build --locked -p coffer-live-auth --bin coffer-op-diagnose"
 
+[tasks.build-live-login-file]
+description = "Build the isolated developer file login harness and existing-state helper"
+run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-login-file"
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

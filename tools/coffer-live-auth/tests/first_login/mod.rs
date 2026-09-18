@@ -43,6 +43,7 @@ impl<T: Copy> Cell<T> {
 #[derive(Default)]
 struct Observations {
     events: Mutex<Vec<&'static str>>,
+    notices: Mutex<Vec<&'static str>>,
     fetched: Cell<usize>,
     connections: Cell<usize>,
     writes: Cell<usize>,
@@ -123,6 +124,7 @@ impl SecureTerminal for Terminal {
     fn notice(&mut self, text: &'static str) -> Result<(), TerminalError> {
         assert!(!text.contains("synthetic@example.invalid"));
         assert!(!text.contains("synthetic-password"));
+        self.0.notices.lock().unwrap().push(text);
         Ok(())
     }
     fn prompt_visible(&mut self, label: &'static str) -> Result<Zeroizing<String>, TerminalError> {
@@ -476,5 +478,89 @@ fn invalid_active_provisioning_stops_before_confirmation_and_fetch() {
         assert_eq!(seen.writes.get(), 0);
         assert!(state.load().is_ok());
         assert!(state.create_new(&Fixed(99)).is_err());
+    }
+}
+
+// Exercise the real file adapter against the same offline first-login seam.
+#[test]
+fn file_input_uses_existing_first_login_storage_and_failure_boundaries() {
+    use crate::file_input::FileTerminal;
+    use std::os::unix::fs::PermissionsExt;
+    for scenario in 0..10 {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("synthetic-file");
+        let bytes: &[u8] = if scenario == 8 {
+            b"EMAIL=synthetic@example.invalid\nPASSWORD=bad\0input"
+        } else {
+            b"EMAIL=synthetic@example.invalid\nPASSWORD=synthetic-password"
+        };
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let seen = Arc::new(Observations::default());
+        seen.two_factor.set(scenario != 0);
+        match scenario {
+            2 => seen.fail_at.set(Some("auth")),
+            3 => seen.fail_at.set(Some("push")),
+            4 => seen.fail_at.set(Some("submit")),
+            5 => seen.fail_at.set(Some("reauth")),
+            6 => seen.decline.set(true),
+            7 => seen.cancel_otp.set(true),
+            9 => seen
+                .backend
+                .fail_next(FakeOperation::CheckAvailable, StoreError::Locked),
+            _ => {}
+        }
+        let mut input = FileTerminal::new(Terminal(seen.clone()), path.clone());
+        let result = run_with(
+            &mut input,
+            &profile(root.path()),
+            &Fixed(42),
+            &Connector(seen.clone()),
+            || {
+                seen.events.lock().unwrap().push("prepare");
+                Ok(())
+            },
+            |()| {
+                seen.events.lock().unwrap().push("validate");
+                Ok(())
+            },
+            |(), terminal| {
+                assert_eq!(
+                    seen.events.lock().unwrap().as_slice(),
+                    ["preflight", "prepare", "validate", "confirm"]
+                );
+                block_on(run_login(Steps(seen.clone()), terminal))
+                    .map(|outcome| outcome.session)
+                    .map_err(|_| FirstLoginError::at("synthetic login", "stopped without retry"))
+            },
+        );
+        input.finish();
+        assert!(input.prompt_hidden("Password (not echoed): ").is_err());
+        // Observe the real run_login notices through the file adapter, so a
+        // source notice change cannot silently restore misleading TTY claims.
+        assert!(
+            seen.notices
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|text| { !text.contains("was not kept") && !text.contains("is typed") })
+        );
+        assert_eq!(result.is_ok(), scenario < 2);
+        assert_eq!(seen.writes.get(), usize::from(scenario < 2));
+        let events = seen.events.lock().unwrap();
+        for stage in ["auth", "push", "submit", "reauth"] {
+            assert!(events.iter().filter(|event| **event == stage).count() <= 1);
+        }
+        if scenario < 2 {
+            assert_eq!(seen.connections.get(), 3);
+            assert_eq!(events.last(), Some(&"reload"));
+        }
+        if scenario >= 8 || scenario == 6 {
+            assert!(!events.contains(&"auth"));
+        }
+        if let Some(stage) = seen.fail_at.get() {
+            assert_eq!(events.last(), Some(&stage));
+        }
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 }

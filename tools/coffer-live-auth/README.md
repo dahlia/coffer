@@ -602,3 +602,72 @@ logged, placed in `Debug` or errors, or written to a diagnostic file.
 
 [official app-integration documentation]: https://www.1password.dev/cli/app-integration
 [direct CLI 2.30 user report]: https://www.1password.community/developers-69/how-can-i-covert-op-get-items-command-to-op-item-get-1512
+
+
+Disposable-account file input: offline implementation
+-----------------------------------------------------
+
+`coffer-live-login-file` is a separate developer-only exception for an
+explicitly approved disposable account. It requires both
+`--credentials-file PATH` and `--new-profile LABEL`, in either order. Both
+selectors must be non-secret; do not put an account identifier in the filename
+or profile label. No credential value is accepted through arguments,
+environment variables, stdin, shell sourcing, or 1Password. The ordinary auth,
+token, delegate and 1Password entry points retain their existing input
+contracts and default profile selection.
+
+Keep this temporary plaintext file outside the repository, owned by the current
+user with exactly mode `0600`. It contains precisely two UTF-8 records, `EMAIL=`
+and `PASSWORD=`, separated by LF, with an optional final LF. Record order does
+not matter. CRLF and all control characters in values are rejected. Values are
+nonempty and at most 1024 bytes each; the whole file is at most 2065 bytes.
+Unknown, missing or duplicate keys and blank lines are rejected. Only the first
+`=` separates a key and value. Values are literal: spaces, additional equals
+signs, quotes, backslashes, dollar signs and hash signs are preserved byte for
+byte. Do not wrap values in quotes, since the quote characters would become
+part of the credential. There is no trimming, interpolation, comment syntax,
+shell execution, or dotenv parsing.
+
+Build the binary and its existing-state helper without running either:
+
+~~~~ sh
+mise run build-live-login-file
+~~~~
+
+Execution requires separate live authorization and a controlling TTY. The
+binary reuses `first_login::run`: it reserves a new profile, checks Secret
+Service and existing local anisette, and requires exactly `LOGIN AND STORE`
+before opening the file. Declining reads no credential file and sends no Apple
+request; the profile reservation can remain. The file adapter validates both
+fields before returning either to the existing login flow. Invalid input stops
+before an Apple request, without falling back to another input source.
+
+Path components are opened relative to held directory descriptors with
+`O_NOFOLLOW`; parent traversal and symlink components are refused. The leaf is
+opened with `O_NONBLOCK` before checking the opened descriptor for regular-file
+type, current effective UID and exact permissions. Reads are bounded even if
+the file grows. A fixed buffer includes one overflow byte and never reallocates
+while holding input. These checks do not protect against a malicious process
+running as the same user, concurrent in-place edits, kernel copies, or a hostile
+filesystem. The outside-repository location is an operator requirement, not a
+runtime repository-discovery mechanism.
+
+One read supplies the account and initial password. Only the trusted-device
+verification code comes from hidden TTY input. After successful code submission,
+the existing protocol's post-2FA step consumes the retained password once,
+without reopening the file. This is not a retry after failed authentication.
+Repeated or out-of-order prompts stop the adapter and drop retained input.
+Passwords are kept in zeroizing memory only through this bounded login flow;
+the persistence notice or explicit finish drops any remaining copy before
+result reporting. Normal errors wipe owned buffers; abrupt process termination
+can skip destructors and does not guarantee erasure. The tool does not remove
+or overwrite the operator's plaintext file.
+
+This path adds no token/delegate issuance, trust, escrow, CKKS, or provisioning
+operation. It uses the existing isolated-profile reservation and Secret Service
+round trip, including their no-retry and no-rollback behavior described above.
+Successful storage proves only local persistence. Synthetic offline tests cover
+literal parsing, bounds, metadata, symlinks, FIFO rejection, confirmation order,
+OTP and one-time post-2FA handoff, failure paths and CLI rejection. No real
+credential file, account, Apple endpoint or Secret Service was accessed to
+implement or validate this adapter; live compatibility remains unverified.
