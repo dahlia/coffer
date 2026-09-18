@@ -1018,6 +1018,7 @@ fn stderr_hints_are_allowlisted_ambiguous_or_unknown_never_causes() {
             "No accounts configured for use with 1Password CLI",
             OpStderrHint::NoAccountsConfigured,
         ),
+        ("isn't a field in", OpStderrHint::FieldLookupText),
     ] {
         let synthetic = format!("synthetic-private-prefix [{marker}] synthetic-private-suffix");
         assert_eq!(stderr_hint(synthetic.as_bytes()), expected);
@@ -1039,6 +1040,108 @@ fn stderr_hints_are_allowlisted_ambiguous_or_unknown_never_causes() {
         b"",
     ] {
         assert_eq!(stderr_hint(unknown), OpStderrHint::Unknown);
+    }
+}
+
+#[test]
+fn field_lookup_text_requires_exact_unambiguous_marker() {
+    let marker = "isn't a field in";
+    for text in [
+        marker.to_owned(),
+        format!(
+            "[synthetic-account] \"synthetic-field\" {marker} \"synthetic-item\" synthetic-secret"
+        ),
+        format!("[{marker}] [{marker}]"),
+    ] {
+        assert_eq!(
+            stderr_hint(text.as_bytes()).label(),
+            "stderr hint: field lookup text; cause not established"
+        );
+    }
+    for text in [
+        format!("prefix{marker}"),
+        format!("{marker}suffix"),
+        format!("_{marker}"),
+        format!("{marker}_"),
+        format!("é{marker}"),
+        format!("{marker}é"),
+        format!("9{marker}"),
+        format!("{marker}9"),
+        "ISN'T A FIELD IN".to_owned(),
+        "isn’t a field in".to_owned(),
+        "isn't a field\nin".to_owned(),
+        "isn't an item".to_owned(),
+    ] {
+        assert_eq!(stderr_hint(text.as_bytes()), OpStderrHint::Unknown);
+    }
+    for other in [
+        "LostConnectionToApp",
+        "connectionreset",
+        "No accounts configured for use with 1Password CLI",
+    ] {
+        for text in [format!("{marker} {other}"), format!("{other} {marker}")] {
+            assert_eq!(stderr_hint(text.as_bytes()), OpStderrHint::Unknown);
+        }
+    }
+    for bytes in [
+        b"\xff isn't a field in".as_slice(),
+        b"isn't a field in \xff",
+    ] {
+        assert_eq!(stderr_hint(bytes), OpStderrHint::Unknown);
+    }
+}
+
+#[test]
+fn field_lookup_child_diagnostic_is_private_and_fetches_once() {
+    let _serial = crate::terminal::tests::SIGNAL_TESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Entirely synthetic values; no captured CLI message or real identifiers.
+    for code in [0, 1] {
+        let mut terminal = DiagnosticTerminal {
+            answer: Ok(Zeroizing::new("DIAGNOSE OP".to_owned())),
+            prompts: 0,
+        };
+        let mut calls = 0;
+        let result = diagnose_with_loader(&mut terminal, selector(), |selection| {
+            calls += 1;
+            let script = format!(
+                r#"read selected; printf '%s' "[synthetic-account] \"synthetic-field\" isn't a field in \"synthetic-item\" synthetic-secret" >&2; printf 'synthetic@example.invalid,synthetic-password\n'; exit {code}"#
+            );
+            let output = run_child(
+                &mut fake_command(&script),
+                selection,
+                Duration::from_secs(2),
+            )?;
+            decode_csv(&output)
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(terminal.prompts, 1);
+        let rendered = if code == 0 {
+            assert_eq!(result, Ok(()));
+            format!("{result:?}")
+        } else {
+            let error = result.unwrap_err();
+            let OpDiagnosticError::Input(OpInputError::Exit { termination, hint }) = error else {
+                panic!("expected a fixed child exit error");
+            };
+            assert_eq!(termination, OpTermination::Code(1));
+            assert_eq!(
+                hint.label(),
+                "stderr hint: field lookup text; cause not established"
+            );
+            format!("{error:?} {error}")
+        };
+        for private in [
+            "synthetic-account",
+            "synthetic-field",
+            "synthetic-item",
+            "synthetic-secret",
+            "synthetic@example.invalid",
+            "synthetic-password",
+        ] {
+            assert!(!rendered.contains(private));
+        }
     }
 }
 

@@ -118,8 +118,12 @@ pub enum OpTermination {
 
 /// A fixed hint from private stderr, never a verified diagnosis.
 ///
-/// The allowlist comes from 1Password's app-integration troubleshooting page:
+/// The first three markers come from 1Password's app-integration troubleshooting page:
 /// <https://www.1password.dev/cli/app-integration>, checked 2026-09-18.
+/// The field-lookup phrase comes from a direct CLI 2.30 user report:
+/// <https://www.1password.community/developers-69/how-can-i-covert-op-get-items-command-to-op-item-get-1512>.
+/// It is an observed string, not an official error contract. See the harness
+/// README for provenance and the limits of the separate CLI 2.39.0 binary check.
 /// Text can be misleading or embedded in private values. No hint authorizes
 /// a retry, unlock, sign-in, configuration change, or any other action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +136,8 @@ pub enum OpStderrHint {
     ConnectionReset,
     /// The documented no-accounts-configured phrase appeared.
     NoAccountsConfigured,
+    /// The observed ASCII `isn't a field in` phrase appeared; no field state is inferred.
+    FieldLookupText,
 }
 impl OpStderrHint {
     /// Returns a literal that distinguishes a text hint from a diagnosis.
@@ -144,6 +150,7 @@ impl OpStderrHint {
             Self::NoAccountsConfigured => {
                 "stderr hint: no accounts configured; cause not established"
             }
+            Self::FieldLookupText => "stderr hint: field lookup text; cause not established",
         }
     }
 }
@@ -160,6 +167,7 @@ fn stderr_hint(bytes: &[u8]) -> OpStderrHint {
             "No accounts configured for use with 1Password CLI",
             OpStderrHint::NoAccountsConfigured,
         ),
+        ("isn't a field in", OpStderrHint::FieldLookupText),
     ] {
         // Match case-sensitive whole tokens/phrases, not arbitrary substrings.
         // Multiple different markers remain ambiguous, even in valid UTF-8.

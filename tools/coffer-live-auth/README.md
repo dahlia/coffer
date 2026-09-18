@@ -560,10 +560,19 @@ report includes an OS exit code or terminating signal, without interpreting
 numeric values as 1Password error codes. Timeouts, interruptions, pipe errors,
 size limits, malformed CSV and account mismatch remain separate fixed errors.
 
-The only stderr markers recognized are `LostConnectionToApp`, `connectionreset`
+The first three stderr markers are `LostConnectionToApp`, `connectionreset`
 and `No accounts configured for use with 1Password CLI`. These names/words come
 from the troubleshooting section of the
 [official app-integration documentation], checked on 18 September 2026.
+
+One additional marker, `isn't a field in` with an ASCII apostrophe, maps to
+`FieldLookupText`. This marker comes from a [direct CLI 2.30 user report] dated
+31 October 2024 and checked on 18 September 2026. It is not an official error
+contract. A separate offline check found that substring in the installed
+*/usr/bin/op* 2.39.0 binary. The string's presence does not prove that this
+version emits it on a particular code path or establish an exit code or failure
+cause. The hint returns no field, item or account value.
+
 Matching is case-sensitive and requires word boundaries around the whole
 marker/phrase. Only one distinct marker produces a fixed `OpStderrHint`; empty,
 invalid UTF-8, unrecognized or ambiguous stderr returns `Unknown`. No other
@@ -580,7 +589,8 @@ before stdout, independent limits and overflow probes, unknown and ambiguous
 hints, exit/signal metadata, successful stderr privacy, timeouts and child
 reaping, parent-only cancellation, separate confirmation, CSV/account rejection,
 and the diagnostic entry point's restricted composition. The previous discarded
-stderr cannot be recovered or used to diagnose the earlier failure.
+stderr cannot be recovered or used to diagnose the earlier failure. Its cause
+remains unconfirmed; this additional hint does not establish it.
 
 Coffer-owned buffers are zeroized when their Rust owners are dropped on
 ordinary return. Signal termination does not unwind Rust stacks and can skip
@@ -591,3 +601,4 @@ descendants are also outside this guarantee. Raw stderr is never printed,
 logged, placed in `Debug` or errors, or written to a diagnostic file.
 
 [official app-integration documentation]: https://www.1password.dev/cli/app-integration
+[direct CLI 2.30 user report]: https://www.1password.community/developers-69/how-can-i-covert-op-get-items-command-to-op-item-get-1512
