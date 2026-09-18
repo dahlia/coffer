@@ -408,3 +408,106 @@ assertion links the no-2FA wipe test to the real persistence notice and verifies
 that it precedes store connection and replacement. The
 worker did not invoke `op`, read an account or item, access Secret Service, load
 proprietary libraries, provision local state, or contact Apple.
+
+
+1Password first login into a new profile: offline implementation
+----------------------------------------------------------------
+
+`coffer-live-login-op` is a separate developer-only entry point for the first
+GSA login.
+It reuses the bounded anonymous-pipe selector/expected-account frame, CSV
+validation, account binding, child cancellation and zeroizing password owners
+of `coffer-live-delegate-op`. It does not issue delegate or service tokens or
+make trust, escrow, CloudKit or CKKS requests. This implementation and its
+synthetic tests do not authorize a live run.
+
+The new binary requires exactly `--new-profile <label>`. This is a narrow
+exception to the other binaries' no-arguments rule: the label is non-secret
+local metadata, 1–32 lowercase ASCII letters, digits or hyphens. Use an opaque
+development label, never an account name, item selector or credential. No other
+argument or credential input channel is accepted. The approved item selector
+and independently approved expected account still arrive only through the
+existing bounded anonymous stdin pipe; the password never passes through argv,
+environment, files or the launcher. The controlling TTY supplies confirmation
+and, when needed, the trusted-device code.
+
+### Reservation and preflight
+
+After validating the arguments and selector frame, the harness exclusively
+creates *$XDG\_STATE\_HOME/coffer/live-auth/profiles/<label>/* with mode 0700.
+It publishes a single random *profile-slot* file with mode 0600 using the
+existing descriptor-relative slot writer. Coffer-owned directories reject
+symlinks and wrong modes. An existing selected profile directory, even empty,
+corrupt or containing a valid slot, stops the run before a credential fetch or
+Apple authentication. A concurrent invocation cannot adopt the winner's slot.
+The default *coffer/live-auth/profile-slot* is never selected or replaced.
+
+The harness reserves the profile before Secret Service and local anisette
+preflight and before confirmation. Consequently a preflight failure, decline,
+interruption or login failure can leave the reservation behind; it is
+deliberately not removed. An error while publishing the slot can leave an empty
+reserved directory. Re-running with that label fails closed. No failure picks
+another label, generates a replacement slot or retries authentication
+automatically. A further attempt requires an explicit human decision and a
+separate new profile.
+
+The selected random slot must have no Secret Service session. Unavailable,
+locked, duplicate, corrupt, unsupported or occupied records stop before
+credential input/authentication. Only installed support libraries and existing
+anisette provisioning are opened, through `Bootstrap::installed` and
+`CofferAnisetteProvider::open_existing`. The process does not change
+`XDG_STATE_HOME`, download libraries or provision another device. It generates
+and discards one set of anisette headers before confirmation or credential
+fetch: opening the identity alone does not validate active provisioning or its
+library binding. This local preflight can update existing provisioning state,
+but performs no network request and never falls back to provisioning.
+
+### Confirmation, authentication and storage
+
+After successful preflight, the user must enter exactly `LOGIN AND STORE` at
+the controlling TTY.
+Declining or interrupting it fetches no credentials and sends no Apple request,
+but retains the local reservation described above. The `LOGIN AND ISSUE`
+confirmation remains exclusive to the delegate entry point.
+
+After confirmation, one credential fetch must match the independently approved
+account byte for byte before `run_login` receives either field. Initial GSA
+uses at most two requests. Trusted-device 2FA adds one code push, one code
+submission and at most two post-2FA GSA requests, for a maximum of six. The
+password is reused once from zeroizing memory for post-2FA authentication;
+1Password is not called a second time. The existing GSA limits remain 60 seconds
+per exchange and 20 minutes from the first exchange, including later human
+input. Each failure stops at its stage, with zero automatic retries.
+
+`persist_and_reload` writes the reusable GSA subset once and compares all
+retained fields after loading through a new Secret Service connection. A wrapper
+rechecks that the slot is still empty immediately before its one `replace` call.
+The retained password is wiped at the existing persistence notice, before the
+writer connects. Three connections are used on success: preflight, writer and
+reader. No account name or password-equivalent token (PET) is persisted by this
+path. Existing profiles and their sessions remain unchanged.
+
+Secret Service's current `SessionStore` interface has no atomic
+create-if-absent operation. Exclusive profile reservation and a final empty-slot
+check prevent accidental reuse by this entry point; an external process running
+as the same user can still race the check and write. Do not concurrently modify
+the reserved slot. A write/reload failure leaves storage potentially changed,
+with no rollback, deletion or retry. Successful reload proves local persistence,
+not token validity, future session reuse or CloudKit access.
+
+Build the harness and its helper without running either binary:
+
+~~~~ sh
+mise run build-live-login-op
+~~~~
+
+This task builds `coffer-anisette-helper` and `coffer-live-login-op` together
+with `--locked`. Live execution is excluded from normal tests and CI.
+Selecting this new profile from the existing token/delegate tools is separate
+future work; those tools continue to select the default profile.
+
+Offline tests cover preflight before credential fetch, wrong-account rejection,
+decline/cancellation, each authentication failure without retry, both 2FA
+branches, original-profile preservation, concurrent reservation, invalid paths
+and modes, last-moment session occupancy, and reload over a new connection.
+They use only synthetic input, fake login steps and an in-memory store.

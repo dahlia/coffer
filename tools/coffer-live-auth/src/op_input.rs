@@ -14,12 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Bounded 1Password input for the separately authorized delegate entry point.
+//! Bounded 1Password input for separately authorized developer login entry points.
 //!
 //! Only [`ItemSelector::from_stdin_pipe`] accepts standard input: an opaque
 //! item ID and the user-approved expected account, never a password. [`OpTerminal`] defers its one child process until
 //! the harness has completed preflight and the exact TTY confirmation. The
-//! existing login flow and ADSID binding remain owned by `delegate_harness`.
+//! selected harness owns preflight and login; `delegate_harness` also owns its
+//! stored ADSID binding. First login requires a separate create-only profile.
 
 use crate::terminal::{ChildSignalDeferral, MAX_INPUT_LEN, SecureTerminal, TerminalError};
 use core::fmt;
@@ -425,7 +426,7 @@ enum State {
 }
 type Loader = Box<dyn FnOnce(&ItemSelector) -> Result<Credentials, OpInputError>>;
 
-/// Narrow terminal wrapper for exactly one delegate harness invocation.
+/// Narrow terminal wrapper for exactly one selected developer harness invocation.
 ///
 /// It forwards the exact visible confirmation and OTP to the original terminal.
 /// Only after an accepted confirmation does the first exact account prompt run
@@ -442,6 +443,7 @@ pub struct OpTerminal<T> {
     password: Option<Zeroizing<String>>,
     loader: Option<Loader>,
     state: State,
+    login_only: bool,
 }
 impl<T: SecureTerminal> OpTerminal<T> {
     /// Wraps the controlling terminal and selector without fetching credentials.
@@ -458,8 +460,36 @@ impl<T: SecureTerminal> OpTerminal<T> {
             password: None,
             loader: Some(Box::new(fetch)),
             state: State::Confirmation,
+            login_only: false,
         }
     }
+    /// Wraps input for [`crate::first_login::run`] with `LOGIN AND STORE`.
+    ///
+    /// This mode permits only the first-login confirmation, then the same
+    /// bounded account/password/optional-2FA sequence as [`Self::new`]. It
+    /// performs no fetch until that harness completes preflight and confirmation.
+    #[must_use]
+    pub fn for_first_login(terminal: T, selector: ItemSelector) -> Self {
+        let mut input = Self::new(terminal, selector);
+        input.login_only = true;
+        input
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_first_login(
+        terminal: T,
+        loader: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, OpInputError> + 'static,
+    ) -> Self {
+        let selector = parse_selector(Zeroizing::new(
+            b"abcdefghijklmnopqrstuvwxyz\nsynthetic@example.invalid\n".to_vec(),
+        ))
+        .ok()
+        .unwrap();
+        let mut input = Self::for_first_login(terminal, selector);
+        input.loader = Some(Box::new(move |_| decode_csv(&loader()?)));
+        input
+    }
+
     /// Wipes retained input after the harness returns, before result reporting.
     /// Subsequent credential prompts fail; fixed notices can still be printed.
     pub fn finish(&mut self) {
@@ -493,7 +523,12 @@ impl<T: SecureTerminal> SecureTerminal for OpTerminal<T> {
         })
     }
     fn prompt_visible(&mut self, label: &'static str) -> Result<Zeroizing<String>, TerminalError> {
-        if self.state != State::Confirmation || label != CONFIRM {
+        let (prompt, accepted) = if self.login_only {
+            (crate::first_login::CONFIRM, "LOGIN AND STORE")
+        } else {
+            (CONFIRM, "LOGIN AND ISSUE")
+        };
+        if self.state != State::Confirmation || label != prompt {
             return Err(self.fail());
         }
         // Poison before delegating; failure/decline must never permit a fetch.
@@ -501,7 +536,7 @@ impl<T: SecureTerminal> SecureTerminal for OpTerminal<T> {
         let answer = self.terminal.prompt_visible(label).inspect_err(|_| {
             self.fail();
         })?;
-        if answer.as_str() == "LOGIN AND ISSUE" {
+        if answer.as_str() == accepted {
             self.state = State::Account;
         } else {
             self.fail();

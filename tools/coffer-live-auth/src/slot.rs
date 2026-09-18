@@ -108,6 +108,10 @@ pub enum SlotStateError {
     Corrupt,
     /// Existing profile state is absent; load-only mode never creates it.
     Missing,
+    /// The selected new profile already exists; it is never adopted.
+    Occupied,
+    /// A new profile label is missing or invalid.
+    InvalidProfile,
     /// The random source failed.
     Entropy,
     /// A filesystem operation failed for another reason.
@@ -126,6 +130,8 @@ impl SlotStateError {
             Self::FileMode => "profile slot file is not mode 0600",
             Self::Corrupt => "profile slot file is corrupt; it is not replaced automatically",
             Self::Missing => "existing profile state is missing",
+            Self::Occupied => "new profile already exists; no retry or replacement",
+            Self::InvalidProfile => "new profile label rejected",
             Self::Entropy => "profile slot could not be generated",
             Self::Io => "profile slot state I/O failed",
         }
@@ -156,6 +162,7 @@ pub enum SlotOrigin {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SlotState {
     state_home: PathBuf,
+    profile: Option<String>,
 }
 
 impl fmt::Debug for SlotState {
@@ -187,7 +194,63 @@ impl SlotState {
     pub fn under_state_home(state_home: &Path) -> Self {
         Self {
             state_home: state_home.to_path_buf(),
+            profile: None,
         }
+    }
+
+    /// Selects a separate developer profile without changing anisette's XDG home.
+    ///
+    /// The label must be non-secret, 1..=32 lowercase ASCII letters, digits or
+    /// hyphens. It is local metadata, never an Apple Account identifier.
+    /// Construction performs no I/O. Call [`Self::create_new`] to reserve it.
+    ///
+    /// # Errors
+    /// Returns [`SlotStateError::InvalidProfile`] for any other label.
+    pub fn new_profile(mut self, label: &str) -> Result<Self, SlotStateError> {
+        if label.is_empty()
+            || label.len() > 32
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(SlotStateError::InvalidProfile);
+        }
+        self.profile = Some(label.to_owned());
+        Ok(self)
+    }
+
+    /// Exclusively reserves a new profile before credential input or authentication.
+    ///
+    /// Creates a mode-0700 directory and publishes one random mode-0600 slot.
+    /// An existing directory, even empty or corrupt, is never adopted. The
+    /// reservation remains after any later failure or declined confirmation;
+    /// there is no automatic cleanup, new slot, or alternate profile attempt.
+    ///
+    /// # Errors
+    /// Returns [`SlotStateError::Occupied`] if another invocation reserved the
+    /// label first. Other failures preserve all existing state and may leave
+    /// an empty reservation. The default profile cannot be reserved this way.
+    pub fn create_new(&self, entropy: &impl Entropy) -> Result<SessionSlot, SlotStateError> {
+        let label = self
+            .profile
+            .as_deref()
+            .ok_or(SlotStateError::InvalidProfile)?;
+        let directory = self.open_directory()?;
+        let profiles = create_and_open_plain_directory(&directory, "profiles")?;
+        mkdirat(&profiles, label, Mode::from_raw_mode(DIRECTORY_MODE)).map_err(|error| {
+            if error == Errno::EXIST {
+                SlotStateError::Occupied
+            } else {
+                SlotStateError::Io
+            }
+        })?;
+        fsync(&profiles).map_err(|_| SlotStateError::Io)?;
+        let reserved = open_plain_directory(&profiles, label)?;
+        let bytes = random_array(entropy).map_err(|_| SlotStateError::Entropy)?;
+        if !publish(&reserved, &bytes)? {
+            return Err(SlotStateError::Occupied);
+        }
+        load_existing(&reserved)?.ok_or(SlotStateError::Io)
     }
 
     /// Loads an existing slot without creating directories or drawing entropy.
@@ -211,10 +274,19 @@ impl SlotState {
         })?;
         let application = open_plain_directory(&base, APPLICATION_DIRECTORY)?;
         let directory = open_plain_directory(&application, HARNESS_DIRECTORY)?;
+        let directory = if let Some(label) = &self.profile {
+            let profiles = open_plain_directory(&directory, "profiles")?;
+            open_plain_directory(&profiles, label)?
+        } else {
+            directory
+        };
         load_existing(&directory)?.ok_or(SlotStateError::Missing)
     }
 
-    /// Returns the existing slot or creates one.
+    /// Returns the existing default slot or creates one.
+    ///
+    /// Explicit named profiles must use [`Self::create_new`]; this method
+    /// rejects them with [`SlotStateError::InvalidProfile`].
     ///
     /// # Errors
     ///
@@ -225,6 +297,9 @@ impl SlotState {
         &self,
         entropy: &impl Entropy,
     ) -> Result<(SessionSlot, SlotOrigin), SlotStateError> {
+        if self.profile.is_some() {
+            return Err(SlotStateError::InvalidProfile);
+        }
         let directory = self.open_directory()?;
         if let Some(slot) = load_existing(&directory)? {
             return Ok((slot, SlotOrigin::Reused));
@@ -837,5 +912,125 @@ mod tests {
         assert!(!rendered.contains(root.path().to_str().unwrap()));
         assert_eq!(rendered, "SlotState(<path redacted>)");
         assert!(!SlotStateError::Corrupt.to_string().contains('/'));
+    }
+}
+
+#[cfg(test)]
+mod new_profile_tests {
+    use super::*;
+    use coffer_protocol::entropy::EntropyError;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    struct Fixed;
+    impl Entropy for Fixed {
+        fn fill(&self, bytes: &mut [u8]) -> Result<(), EntropyError> {
+            bytes.fill(42);
+            Ok(())
+        }
+    }
+    #[test]
+    fn labels_are_bounded_single_components_and_debug_is_redacted() {
+        let state = SlotState::under_state_home(Path::new("/synthetic-path"));
+        for label in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "A",
+            "a_b",
+            "a@example.invalid",
+            "a\n",
+            &"a".repeat(33),
+        ] {
+            assert_eq!(
+                state.clone().new_profile(label),
+                Err(SlotStateError::InvalidProfile)
+            );
+        }
+        let selected = state.new_profile("synthetic-label").unwrap();
+        assert!(!format!("{selected:?}").contains("synthetic"));
+    }
+    #[test]
+    fn reservation_never_adopts_existing_empty_corrupt_or_valid_profiles() {
+        for contents in [
+            None,
+            Some(b"corrupt".as_slice()),
+            Some(render(&[1; 16]).as_slice()),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = SlotState::under_state_home(root.path())
+                .new_profile("example")
+                .unwrap();
+            state.create_new(&Fixed).unwrap();
+            let path = root
+                .path()
+                .join("coffer/live-auth/profiles/example/profile-slot");
+            if let Some(bytes) = contents {
+                std::fs::write(&path, bytes).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            assert_eq!(state.create_new(&Fixed), Err(SlotStateError::Occupied));
+            assert_eq!(
+                state.load_or_create(&Fixed),
+                Err(SlotStateError::InvalidProfile)
+            );
+            if let Some(bytes) = contents {
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            } else {
+                assert!(!path.exists());
+            }
+        }
+    }
+    #[test]
+    fn profiles_directory_symlink_and_wrong_mode_fail_closed() {
+        for symbolic in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = SlotState::under_state_home(root.path());
+            state.load_or_create(&Fixed).unwrap();
+            let profiles = root.path().join("coffer/live-auth/profiles");
+            let target = root.path().join("outside");
+            std::fs::create_dir(&target).unwrap();
+            if symbolic {
+                symlink(&target, &profiles).unwrap();
+            } else {
+                std::fs::create_dir(&profiles).unwrap();
+                std::fs::set_permissions(&profiles, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            assert!(
+                state
+                    .new_profile("example")
+                    .unwrap()
+                    .create_new(&Fixed)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+        }
+    }
+    #[test]
+    fn concurrent_reservations_have_exactly_one_winner_and_no_adoption() {
+        let root = tempfile::tempdir().unwrap();
+        let state = SlotState::under_state_home(root.path())
+            .new_profile("example")
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let worker = || {
+                barrier.wait();
+                state.create_new(&Fixed)
+            };
+            let first = scope.spawn(worker);
+            let second = scope.spawn(worker);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|r| **r == Err(SlotStateError::Occupied))
+                .count(),
+            1
+        );
+        assert!(state.load().is_ok());
     }
 }

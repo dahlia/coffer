@@ -425,6 +425,7 @@ struct ScriptTerminal {
     decline: bool,
     fail_visible: bool,
     fail_hidden: bool,
+    login_only: bool,
 }
 impl SecureTerminal for ScriptTerminal {
     fn notice(&mut self, text: &'static str) -> Result<(), TerminalError> {
@@ -439,6 +440,8 @@ impl SecureTerminal for ScriptTerminal {
         Ok(Zeroizing::new(
             if self.decline {
                 "DECLINE"
+            } else if self.login_only {
+                "LOGIN AND STORE"
             } else {
                 "LOGIN AND ISSUE"
             }
@@ -908,4 +911,44 @@ fn actual_selector_pipe_read_failure_is_selector_error_and_restores_flags() {
         Some(OpInputError::Selector)
     );
     assert_eq!(fcntl_getfl(&pipe).unwrap(), before);
+}
+
+#[test]
+fn first_login_confirmation_is_separate_and_reuses_password_then_wipes() {
+    for two_factor in [false, true] {
+        let (mut terminal, fetched) = terminal(false);
+        terminal.login_only = true;
+        terminal.terminal.login_only = true;
+        terminal
+            .prompt_visible(crate::first_login::CONFIRM)
+            .unwrap();
+        assert_eq!(fetched.get(), 0);
+        terminal.prompt_hidden(ACCOUNT).unwrap();
+        assert_eq!(
+            terminal.prompt_hidden(PASSWORD).unwrap().as_str(),
+            "synthetic-password"
+        );
+        if two_factor {
+            terminal.prompt_hidden(OTP).unwrap();
+            assert_eq!(
+                terminal.prompt_hidden(REAUTH).unwrap().as_str(),
+                "synthetic-password"
+            );
+        }
+        terminal.notice(STORE_NOTICE).unwrap();
+        assert!(terminal.password.is_none());
+        assert_eq!(fetched.get(), 1);
+    }
+    for first_login in [false, true] {
+        let (mut terminal, fetched) = terminal(false);
+        terminal.login_only = first_login;
+        let wrong = if first_login {
+            CONFIRM
+        } else {
+            crate::first_login::CONFIRM
+        };
+        assert!(terminal.prompt_visible(wrong).is_err());
+        assert!(terminal.prompt_hidden(ACCOUNT).is_err());
+        assert_eq!(fetched.get(), 0);
+    }
 }

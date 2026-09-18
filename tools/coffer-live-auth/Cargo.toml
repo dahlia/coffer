@@ -25,6 +25,10 @@ path = "src/delegate_main.rs"
 name = "coffer-live-delegate-op"
 path = "src/delegate_op_main.rs"
 
+[[bin]]
+name = "coffer-live-login-op"
+path = "src/login_op_main.rs"
+
 [dependencies]
 coffer-anisette = { path = "../../crates/coffer-anisette" }
 coffer-bootstrap = { path = "../../crates/coffer-bootstrap" }

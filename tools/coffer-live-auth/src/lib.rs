@@ -68,6 +68,7 @@ pub mod anisette;
 pub mod delegate_harness;
 pub mod delegate_transport;
 pub mod entropy;
+pub mod first_login;
 pub mod flow;
 pub mod harness;
 pub mod op_input;
@@ -124,6 +125,8 @@ mod tests {
             ("delegate_harness.rs", include_str!("delegate_harness.rs")),
             ("delegate_main.rs", include_str!("delegate_main.rs")),
             ("delegate_op_main.rs", include_str!("delegate_op_main.rs")),
+            ("first_login.rs", include_str!("first_login.rs")),
+            ("login_op_main.rs", include_str!("login_op_main.rs")),
             ("op_input.rs", include_str!("op_input.rs")),
             ("slot.rs", include_str!("slot.rs")),
             ("store.rs", include_str!("store.rs")),

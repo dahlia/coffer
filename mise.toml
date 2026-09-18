@@ -136,6 +136,11 @@ run = "cargo run --quiet --locked -p coffer-live-auth --bin coffer-live-delegate
 description = "Build the 1Password pipe delegate harness and existing-state helper"
 run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-delegate-op"
 
+# Build only; execution requires the reviewed private selector/account pipe.
+[tasks.build-live-login-op]
+description = "Build the isolated first-login 1Password harness and existing-state helper"
+run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-login-op"
+
 # Dependency audit ------------------------------------------------------------
 
 # The policy lives in deny.toml.  This task is part of the gate but not of

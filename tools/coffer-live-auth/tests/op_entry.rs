@@ -28,3 +28,28 @@ fn arguments_are_rejected_before_any_input_or_preflight() {
         .unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(2));
 }
+
+#[test]
+fn first_login_refuses_missing_extra_or_private_arguments_before_tty_or_state() {
+    for args in [
+        vec![],
+        vec!["--new-profile"],
+        vec!["--new-profile", "../escape"],
+        vec!["--new-profile", "synthetic@example.invalid"],
+        vec!["--new-profile", "UPPERCASE"],
+        vec!["--new-profile", ""],
+        vec!["--new-profile", "synthetic", "extra"],
+        vec!["--profile", "synthetic"],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_coffer-live-login-op"))
+            .args(args)
+            .env("XDG_STATE_HOME", root.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic"));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
