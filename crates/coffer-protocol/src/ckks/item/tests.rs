@@ -70,6 +70,10 @@ fn build<'a>(fields: &[Field<'a>]) -> Result<ItemAssociatedData<'a>, ItemError> 
 }
 fn reject(fields: &[Field<'_>], expected: ItemError) {
     assert_eq!(build(fields).unwrap_err(), expected);
+    // Exercise the same malformed inventory through the composition boundary.
+    with_class_key(parent(), KeyClass::ClassA, false, |key| {
+        reject_open(key, fields, expected, (0, 0));
+    });
 }
 
 #[test]
@@ -808,4 +812,400 @@ fn independent_fixture_hashes_are_fixed() {
             .collect::<String>();
         assert_eq!(hex, hash);
     }
+}
+
+// Item opening reuses independent OpenSSL wrap and payload fixtures. All graph
+// metadata is invented; successful authentication does not make it trusted.
+fn wrap_fixture(hex: &str) -> Vec<u8> {
+    let hex = hex.trim();
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+fn item_wrap() -> Vec<u8> {
+    wrap_fixture(include_str!(
+        "../../../tests/fixtures/ckks-wrap/grandchild.hex"
+    ))
+}
+fn with_class_key(
+    selected: KeyId<'_>,
+    class: crate::ckks::hierarchy::KeyClass,
+    wrong_bytes: bool,
+    test: impl FnOnce(&ResolvedKey<'_>),
+) {
+    use crate::ckks::{UnwrappingKey, hierarchy::*};
+    let self_wrap = wrap_fixture(include_str!("../../../tests/fixtures/ckks-wrap/self.hex"));
+    let child = wrap_fixture(include_str!("../../../tests/fixtures/ckks-wrap/child.hex"));
+    let root = KeyId {
+        name: "root",
+        ..selected
+    };
+    let records = [
+        KeyRecord {
+            id: root,
+            parent: Some(root),
+            class: KeyClass::Tlk,
+            wrapped: &self_wrap,
+        },
+        KeyRecord {
+            id: selected,
+            parent: Some(root),
+            class,
+            wrapped: if wrong_bytes { &self_wrap } else { &child },
+        },
+    ];
+    let anchor = AnchorInput {
+        id: root,
+        key: UnwrappingKey::new(Zeroizing::new(core::array::from_fn(|i| i as u8))),
+    };
+    let graph = KeyGraph::validate(
+        selected.scope,
+        &records,
+        InputCompleteness::Complete,
+        root,
+        HierarchyLimits::default(),
+    )
+    .unwrap();
+    let key = graph.unwrap_target(&anchor, selected).unwrap();
+    OPEN_CALLS.with(|n| n.set((0, 0)));
+    test(&key);
+}
+fn open_calls() -> (usize, usize) {
+    OPEN_CALLS.with(|n| n.replace((0, 0)))
+}
+fn open_fixture(key: &ResolvedKey<'_>, input: &[Field<'_>]) -> Result<PayloadPlaintext, ItemError> {
+    open(id(), "item", input, FieldCompleteness::Complete, key)
+}
+fn reject_open(
+    key: &ResolvedKey<'_>,
+    input: &[Field<'_>],
+    error: ItemError,
+    calls: (usize, usize),
+) {
+    // Failure carries no plaintext or key, and the explicit parser cannot run.
+    let mut parser_calls = 0;
+    let result = open_fixture(key, input).map(|owner| {
+        parser_calls += 1;
+        let _ = crate::ckks::plaintext::parse_ckks_plaintext(&owner);
+    });
+    assert_eq!(result.unwrap_err(), error);
+    assert_eq!(open_calls(), calls);
+    assert_eq!(parser_calls, 0);
+}
+
+#[test]
+fn open_independent_class_a_and_c_vectors_once_then_explicit_parse() {
+    use crate::ckks::hierarchy::KeyClass;
+    let wrapped = item_wrap();
+    for class in [KeyClass::ClassA, KeyClass::ClassC] {
+        with_class_key(parent(), class, false, |key| {
+            for all in [false, true] {
+                let mut input = fixture_fields(all);
+                input[1].value = FieldValue::WrappedKey(&wrapped);
+                let owner = open_fixture(key, &input).unwrap();
+                assert_eq!(open_calls(), (1, 1));
+                let plain = include_bytes!("../../../tests/fixtures/ckks-plaintext/inet.bplist");
+                assert!(owner.expose_secret()[..plain.len()] == plain[..]);
+                assert!(owner.expose_secret()[plain.len()..] == [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                let view = crate::ckks::plaintext::parse_ckks_plaintext(&owner).unwrap();
+                let candidate = view.internet_password_candidate().unwrap();
+                assert!(candidate.account().equals("fixture-reader-한😀"));
+                assert!(candidate.server().equals("login.example.invalid"));
+                assert!(candidate.password() == [0, 255, 128, 0, 65]);
+                assert_eq!(format!("{owner:?}"), "PayloadPlaintext(<redacted>)");
+                assert_eq!(format!("{key:?}"), "ResolvedKey(<redacted>)");
+            }
+        });
+    }
+}
+
+#[test]
+fn open_checks_every_selected_scope_component_and_parent_name_before_crypto() {
+    use crate::ckks::hierarchy::KeyClass;
+    let wrapped = item_wrap();
+    let mut input = fixture_fields(true);
+    input[1].value = FieldValue::WrappedKey(&wrapped);
+    for changed in [
+        KeyScope {
+            account: "other",
+            ..scope()
+        },
+        KeyScope {
+            container: "other",
+            ..scope()
+        },
+        KeyScope {
+            environment: Environment::Development,
+            ..scope()
+        },
+        KeyScope {
+            database: Database::Shared,
+            ..scope()
+        },
+        KeyScope {
+            database: Database::Public,
+            ..scope()
+        },
+        KeyScope {
+            zone_owner: "other",
+            ..scope()
+        },
+        KeyScope {
+            zone_name: "other",
+            ..scope()
+        },
+    ] {
+        with_class_key(
+            KeyId {
+                scope: changed,
+                ..parent()
+            },
+            KeyClass::ClassA,
+            false,
+            |key| {
+                reject_open(key, &input, ItemError::ParentKeyMismatch, (0, 0));
+            },
+        );
+    }
+    for name in ["Class-a", "class-a ", "other"] {
+        with_class_key(KeyId { name, ..parent() }, KeyClass::ClassA, false, |key| {
+            reject_open(key, &input, ItemError::ParentKeyMismatch, (0, 0));
+        });
+    }
+    // This TLK contains the correct B bytes; class policy must still reject it.
+    with_class_key(parent(), KeyClass::Tlk, false, |key| {
+        reject_open(key, &input, ItemError::UnsupportedKeyClass, (0, 0));
+    });
+    with_class_key(parent(), KeyClass::ClassA, true, |key| {
+        reject_open(key, &input, ItemError::KeyAuthenticationFailed, (1, 0));
+    });
+}
+
+#[test]
+fn open_rejects_every_wrap_corruption_and_truncation_without_payload_attempt() {
+    use crate::ckks::hierarchy::KeyClass;
+    let wrapped = item_wrap();
+    with_class_key(parent(), KeyClass::ClassC, false, |key| {
+        for i in 0..wrapped.len() {
+            let mut altered = wrapped.clone();
+            altered[i] ^= 1;
+            let before = altered.clone();
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&altered);
+            reject_open(key, &input, ItemError::KeyAuthenticationFailed, (1, 0));
+            assert_eq!(altered, before);
+        }
+        for end in 0..wrapped.len() {
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&wrapped[..end]);
+            reject_open(key, &input, ItemError::InvalidWrappedKeyLength, (0, 0));
+        }
+    });
+}
+
+#[test]
+fn open_payload_corruptions_truncations_and_negative_fixtures_stop_after_one_attempt() {
+    use crate::ckks::hierarchy::KeyClass;
+    let wrapped = item_wrap();
+    with_class_key(parent(), KeyClass::ClassA, false, |key| {
+        for i in 0..ALL.len() {
+            let mut altered = ALL.to_vec();
+            altered[i] ^= 1;
+            let before = altered.clone();
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&wrapped);
+            input[2].value = FieldValue::Data(&altered);
+            reject_open(key, &input, ItemError::PayloadAuthenticationFailed, (1, 1));
+            assert_eq!(altered, before);
+        }
+        for end in 0..ALL.len() {
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&wrapped);
+            input[2].value = FieldValue::Data(&ALL[..end]);
+            let (error, calls) = if end < 32 {
+                (ItemError::InvalidEnvelopeLength, (0, 0))
+            } else {
+                (ItemError::PayloadAuthenticationFailed, (1, 1))
+            };
+            reject_open(key, &input, error, calls);
+        }
+        for envelope in [NONCE_LAST, CONCATENATED] {
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&wrapped);
+            input[2].value = FieldValue::Data(envelope);
+            reject_open(key, &input, ItemError::PayloadAuthenticationFailed, (1, 1));
+        }
+    });
+}
+
+#[test]
+fn open_authenticates_metadata_but_does_not_authenticate_omitted_claims() {
+    use crate::ckks::hierarchy::KeyClass;
+    let wrapped = item_wrap();
+    with_class_key(parent(), KeyClass::ClassA, false, |key| {
+        for index in [3, 5, 6, 7] {
+            let mut input = fixture_fields(true);
+            input[1].value = FieldValue::WrappedKey(&wrapped);
+            input[index].value = match index {
+                3 | 5 => FieldValue::Integer(1),
+                _ => FieldValue::Data(b"changed"),
+            };
+            reject_open(key, &input, ItemError::PayloadAuthenticationFailed, (1, 1));
+        }
+        let mut input = fixture_fields(true);
+        input[1].value = FieldValue::WrappedKey(&wrapped);
+        assert_eq!(
+            open(
+                ItemId {
+                    name: "changed",
+                    ..id()
+                },
+                "item",
+                &input,
+                FieldCompleteness::Complete,
+                key
+            )
+            .unwrap_err(),
+            ItemError::PayloadAuthenticationFailed
+        );
+        assert_eq!(open_calls(), (1, 1));
+        input.push(Field {
+            name: "uploadver",
+            value: FieldValue::Text("changed"),
+        });
+        assert!(open_fixture(key, &input).is_ok());
+        assert_eq!(open_calls(), (1, 1));
+    });
+    // Consistently rebinding unauthenticated metadata still succeeds. This must
+    // never be interpreted as authenticated account ownership or trusted class.
+    let changed = KeyScope {
+        account: "rebound",
+        ..scope()
+    };
+    let selected = KeyId {
+        scope: changed,
+        ..parent()
+    };
+    with_class_key(selected, KeyClass::ClassC, false, |key| {
+        let mut input = fixture_fields(true);
+        input[0].value = FieldValue::Reference(selected);
+        input[1].value = FieldValue::WrappedKey(&wrapped);
+        assert!(
+            open(
+                ItemId {
+                    scope: changed,
+                    ..id()
+                },
+                "item",
+                &input,
+                FieldCompleteness::Complete,
+                key
+            )
+            .is_ok()
+        );
+        assert_eq!(open_calls(), (1, 1));
+    });
+}
+
+#[test]
+fn open_complete_preflight_precedes_even_invalid_wrap_authentication() {
+    use crate::ckks::hierarchy::KeyClass;
+    with_class_key(parent(), KeyClass::ClassA, false, |key| {
+        let input = fields(); // Valid shape, deliberately unauthentic ciphertext.
+        assert_eq!(
+            open(id(), "item", &input, FieldCompleteness::Incomplete, key).unwrap_err(),
+            ItemError::IncompleteInput
+        );
+        assert_eq!(open_calls(), (0, 0));
+        assert_eq!(
+            open(id(), "wrong", &input, FieldCompleteness::Complete, key).unwrap_err(),
+            ItemError::UnsupportedRecordType
+        );
+        assert_eq!(open_calls(), (0, 0));
+        for value in [0, 1, 3] {
+            let mut input = fields();
+            input[4].value = FieldValue::Integer(value);
+            reject_open(key, &input, ItemError::UnsupportedVersion, (0, 0));
+        }
+        let huge = vec![0; 1024 * 1024];
+        let pcs = vec![0; 65537];
+        for (name, value, error) in [
+            (
+                "pcspublickey",
+                FieldValue::Data(&pcs),
+                ItemError::LimitExceeded,
+            ),
+            (
+                "pcspublicidentity",
+                FieldValue::Data(&huge),
+                ItemError::LimitExceeded,
+            ),
+            (
+                "uploadver",
+                FieldValue::Unsupported,
+                ItemError::UnsupportedFieldType,
+            ),
+            (
+                "server_future",
+                FieldValue::Data(b""),
+                ItemError::UnknownField,
+            ),
+            ("gen", FieldValue::Integer(0), ItemError::DuplicateField),
+        ] {
+            let mut input = fields();
+            input.push(Field { name, value });
+            reject_open(key, &input, error, (0, 0));
+        }
+    });
+}
+
+#[test]
+fn open_errors_have_only_fixed_messages_and_no_sources() {
+    for (error, debug, display) in [
+        (
+            ItemError::ParentKeyMismatch,
+            "ParentKeyMismatch",
+            "CKKS item parent key mismatch",
+        ),
+        (
+            ItemError::UnsupportedKeyClass,
+            "UnsupportedKeyClass",
+            "unsupported CKKS item parent key class",
+        ),
+        (
+            ItemError::KeyAuthenticationFailed,
+            "KeyAuthenticationFailed",
+            "CKKS item key authentication failed",
+        ),
+        (
+            ItemError::PayloadAuthenticationFailed,
+            "PayloadAuthenticationFailed",
+            "CKKS item payload authentication failed",
+        ),
+    ] {
+        assert_eq!(format!("{error:?}"), debug);
+        assert_eq!(format!("{error}"), display);
+        assert!(std::error::Error::source(&error).is_none());
+    }
+}
+
+#[test]
+fn open_validated_record_retains_exact_borrows_and_parent_ad_is_authenticated() {
+    let wrapped = item_wrap();
+    let mut input = fixture_fields(true);
+    input[1].value = FieldValue::WrappedKey(&wrapped);
+    let validated = validate_record(id(), "item", &input, FieldCompleteness::Complete).unwrap();
+    assert_eq!(validated.parent, parent());
+    assert!(core::ptr::eq(validated.wrapped.as_ptr(), wrapped.as_ptr()));
+    assert!(core::ptr::eq(validated.envelope.as_ptr(), ALL.as_ptr()));
+    assert_eq!(format!("{validated:?}"), "<redacted>");
+    let renamed = KeyId {
+        name: "renamed-class",
+        ..parent()
+    };
+    input[0].value = FieldValue::Reference(renamed);
+    with_class_key(renamed, KeyClass::ClassA, false, |key| {
+        reject_open(key, &input, ItemError::PayloadAuthenticationFailed, (1, 1));
+    });
 }

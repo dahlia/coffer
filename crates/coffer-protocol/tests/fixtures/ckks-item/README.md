@@ -3,7 +3,10 @@ Offline CKKS item AD fixtures
 
 These fixtures contain invented public inputs, never captured credentials.
 They exercise the closed v2 metadata subset through the existing payload
-primitive. No key hierarchy, CloudKit transport or live account is involved.
+primitive. The item-opening tests also use the independent wrapped-key fixtures
+from *../ckks-wrap/* to resolve B from A, unwrap C with B, and decrypt these
+same envelopes. All hierarchy metadata is invented. No CloudKit transport or
+live account is involved.
 
 The synthetic AES-256-SIV key is the 64 bytes `80` through `bf`, matching the
 public item-key pattern in the existing CKKS wrapped-key fixtures. The nonce
@@ -47,7 +50,9 @@ model identity and verification commands.
 Save the following block as *generate.c*. With an existing C compiler and
 OpenSSL development headers, run these opt-in reproduction commands in this
 fixture directory; they are not setup instructions or CI dependencies.
-Normal Rust tests only consume the static files.
+Normal Rust tests only consume the static files. The item-opening follow-up
+reproduced all five envelopes byte for byte using this unchanged generator;
+no new fixture format, primitive or captured record was introduced.
 
 ~~~~ sh
 cc -std=c11 -Wall -Wextra -Werror generate.c -lcrypto -o /tmp/coffer-item-generate

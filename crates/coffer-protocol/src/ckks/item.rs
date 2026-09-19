@@ -14,15 +14,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Bounded offline construction of known CKKS v2 item associated data.
+//! Bounded offline CKKS v2 item metadata and explicit class-key opening.
 //!
 //! This module accepts a complete caller-supplied typed field inventory, not
 //! CloudKit wire bytes. It validates a deliberately closed subset before
-//! constructing ordered AD. It performs no crypto, key lookup, I/O or retries.
+//! constructing ordered AD. Explicit opening unwraps one item key and decrypts
+//! one payload; neither operation performs key lookup, I/O or retries.
 //! Completeness, original wire types and account trust remain caller assertions.
 //! See `CKKS_ITEM.md` for the field contract, evidence and unsupported cases.
 
-use super::hierarchy::{KeyId, KeyScope};
+use super::hierarchy::{KeyClass, KeyId, KeyScope, ResolvedKey};
+use super::payload::{self, PayloadPlaintext};
 use core::fmt;
 use zeroize::Zeroizing;
 
@@ -75,7 +77,7 @@ pub enum FieldValue<'a> {
     ///
     /// This is a semantic adapter value, not the original `wrappedkey` wire
     /// string. The adapter must validate the original field type and encoding
-    /// before constructing it. This module does not decode base64 or unwrap it.
+    /// before constructing it. The AD builder does not decode base64 or unwrap it.
     WrappedKey(&'a [u8]),
     /// An unsupported source type. Always rejected, never treated as absence.
     Unsupported,
@@ -200,6 +202,14 @@ pub enum ItemError {
     InvalidWrappedKeyLength,
     /// Envelope bytes were outside 32 bytes through 1 MiB.
     InvalidEnvelopeLength,
+    /// The selected key's full identity differs from the parent reference.
+    ParentKeyMismatch,
+    /// The selected key is not a claimed Class A or Class C key.
+    UnsupportedKeyClass,
+    /// The supplied wrapped item key did not authenticate with the selected key.
+    KeyAuthenticationFailed,
+    /// The supplied payload did not authenticate with the unwrapped item key.
+    PayloadAuthenticationFailed,
 }
 impl fmt::Display for ItemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -217,6 +227,10 @@ impl fmt::Display for ItemError {
             Self::ScopeMismatch => "CKKS item parent scope mismatch",
             Self::InvalidWrappedKeyLength => "invalid CKKS item wrapped-key length",
             Self::InvalidEnvelopeLength => "invalid CKKS item envelope length",
+            Self::ParentKeyMismatch => "CKKS item parent key mismatch",
+            Self::UnsupportedKeyClass => "unsupported CKKS item parent key class",
+            Self::KeyAuthenticationFailed => "CKKS item key authentication failed",
+            Self::PayloadAuthenticationFailed => "CKKS item payload authentication failed",
         })
     }
 }
@@ -256,6 +270,25 @@ pub fn build_associated_data<'a>(
     fields: &[Field<'a>],
     completeness: FieldCompleteness,
 ) -> Result<ItemAssociatedData<'a>, ItemError> {
+    validate_record(id, record_type, fields, completeness).map(|record| record.ad)
+}
+
+// Only the complete preflight below constructs this immutable record. Retain
+// exactly the borrowed parent/wrapped/envelope that supplied this AD, so opening
+// cannot pair an independently built AD handle with unrelated ciphertext.
+struct ValidatedRecord<'a> {
+    parent: KeyId<'a>,
+    wrapped: &'a [u8],
+    envelope: &'a [u8],
+    ad: ItemAssociatedData<'a>,
+}
+
+fn validate_record<'a>(
+    id: ItemId<'a>,
+    record_type: &str,
+    fields: &[Field<'a>],
+    completeness: FieldCompleteness,
+) -> Result<ValidatedRecord<'a>, ItemError> {
     if completeness != FieldCompleteness::Complete {
         return Err(ItemError::IncompleteInput);
     }
@@ -311,16 +344,16 @@ pub fn build_associated_data<'a>(
     if parent.scope != id.scope {
         return Err(ItemError::ScopeMismatch);
     }
-    match required(slots[1])? {
-        FieldValue::WrappedKey(bytes) if bytes.len() == 80 => {}
+    let wrapped = match required(slots[1])? {
+        FieldValue::WrappedKey(bytes) if bytes.len() == 80 => bytes,
         FieldValue::WrappedKey(_) => return Err(ItemError::InvalidWrappedKeyLength),
         _ => return Err(ItemError::UnsupportedFieldType),
-    }
-    match required(slots[2])? {
-        FieldValue::Data(bytes) if (32..=MAX_ENVELOPE_BYTES).contains(&bytes.len()) => {}
+    };
+    let envelope = match required(slots[2])? {
+        FieldValue::Data(bytes) if (32..=MAX_ENVELOPE_BYTES).contains(&bytes.len()) => bytes,
         FieldValue::Data(_) => return Err(ItemError::InvalidEnvelopeLength),
         _ => return Err(ItemError::UnsupportedFieldType),
-    }
+    };
     let generation = integer(required(slots[3])?)?;
     let version = integer(required(slots[4])?)?;
     if version != 2 {
@@ -334,17 +367,22 @@ pub fn build_associated_data<'a>(
     {
         return Err(ItemError::UnsupportedFieldType);
     }
-    Ok(ItemAssociatedData {
-        record_name: id.name,
-        parent_name: parent.name,
-        integers: Zeroizing::new([
-            version.to_le_bytes(),
-            generation.to_le_bytes(),
-            service.unwrap_or(0).to_le_bytes(),
-        ]),
-        pcs_service_present: service.is_some(),
-        pcs_public_key: public_key,
-        pcs_public_identity: public_identity,
+    Ok(ValidatedRecord {
+        parent,
+        wrapped,
+        envelope,
+        ad: ItemAssociatedData {
+            record_name: id.name,
+            parent_name: parent.name,
+            integers: Zeroizing::new([
+                version.to_le_bytes(),
+                generation.to_le_bytes(),
+                service.unwrap_or(0).to_le_bytes(),
+            ]),
+            pcs_service_present: service.is_some(),
+            pcs_public_key: public_key,
+            pcs_public_identity: public_identity,
+        },
     })
 }
 fn required(value: Option<FieldValue<'_>>) -> Result<FieldValue<'_>, ItemError> {
@@ -404,8 +442,80 @@ redacted!(
     Field<'_>,
     FieldValue<'_>,
     ItemAssociatedData<'_>,
-    AdComponents<'_>
+    AdComponents<'_>,
+    ValidatedRecord<'_>
 );
+
+/// Opens one complete v2 item with one explicitly selected resolved class key.
+///
+/// Uses the same closed field contract and complete preflight as
+/// [`build_associated_data`], retaining the exact parent, wrapped key, envelope
+/// and AD from that inventory. Before crypto, the selected key's full [`KeyId`]
+/// must equal the parent reference and its claimed class must be Class A/C.
+/// Scope and class checks are structural, not evidence of account or key trust.
+///
+/// Borrows the resolved key without copying its raw bytes. Unwraps the supplied
+/// item key once, then authenticates the supplied payload once with the v2 AD.
+/// The transient item key uses zeroizing ownership and is dropped before return.
+/// Failure stops immediately: no other key, ordering, record, retry or fallback.
+/// Input owners remain responsible for wiping their original borrowed buffers.
+///
+/// Returns opaque zeroizing plaintext only after authentication. Call
+/// [`super::plaintext::parse_ckks_plaintext`] separately if that representation
+/// is intended; opening does not parse, classify, cache or persist plaintext.
+/// Authentication covers only encoded components, not scope, `uploadver`,
+/// omitted fields, freshness, class semantics, anchor trust or completeness.
+/// This offline operation does not establish live Apple compatibility.
+///
+/// # Errors
+/// Returns the fixed preflight errors of [`build_associated_data`],
+/// [`ItemError::ParentKeyMismatch`] or [`ItemError::UnsupportedKeyClass`] before
+/// any crypto. Otherwise returns [`ItemError::KeyAuthenticationFailed`] with
+/// no payload attempt, or [`ItemError::PayloadAuthenticationFailed`] with no
+/// plaintext. Errors contain no input values, partial key or plaintext.
+pub fn open(
+    id: ItemId<'_>,
+    record_type: &str,
+    fields: &[Field<'_>],
+    completeness: FieldCompleteness,
+    class_key: &ResolvedKey<'_>,
+) -> Result<PayloadPlaintext, ItemError> {
+    let record = validate_record(id, record_type, fields, completeness)?;
+    if class_key.id() != record.parent {
+        return Err(ItemError::ParentKeyMismatch);
+    }
+    if !matches!(class_key.class(), KeyClass::ClassA | KeyClass::ClassC) {
+        return Err(ItemError::UnsupportedKeyClass);
+    }
+    // The validated record caps AD at seven components, each at most 64 KiB,
+    // with aggregate below 1 MiB; all payload bounds therefore hold before
+    // this first crypto attempt. The wrapped key is exactly 80 bytes.
+    #[cfg(test)]
+    OPEN_CALLS.with(|n| {
+        let (unwrap, payload) = n.get();
+        n.set((unwrap + 1, payload));
+    });
+    let item_key = class_key
+        .unwrapping_key()
+        .unwrap_key(record.wrapped)
+        .map_err(|_| ItemError::KeyAuthenticationFailed)?;
+    #[cfg(test)]
+    OPEN_CALLS.with(|n| {
+        let (unwrap, payload) = n.get();
+        n.set((unwrap, payload + 1));
+    });
+    payload::decrypt(
+        &item_key,
+        record.envelope,
+        record.ad.components().as_slice(),
+    )
+    .map_err(|_| ItemError::PayloadAuthenticationFailed)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static OPEN_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
 
 #[cfg(test)]
 mod tests;

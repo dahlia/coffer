@@ -173,17 +173,20 @@ may consume a finite server-side attempt budget.
 
 Offline AES-SIV key unwrapping and bounded whole-graph structural validation
 are implemented with independent synthetic vectors. A caller-supplied anchor
-can unwrap one selected class-key path. This does not authenticate metadata,
-establish anchor trust, prove collection completeness, retrieve records,
-decrypt credential items, or establish live CKKS interoperability. The items
-below remain incomplete. A separate bounded offline payload primitive decrypts
-one nonce/tag/ciphertext envelope with a caller-selected key and ordered AD,
-using independent synthetic fixtures. It returns opaque bytes. An explicit
-borrowed plaintext parser supports a bounded flat binary-plist subset and a
-narrow Internet password candidate with an integer-zero tombstone field.
-Independent synthetic fixtures cover this local subset; complete website
-record coverage, metadata sidecars, the account-to-credential path and live
-compatibility remain unverified.
+can unwrap one selected class-key path. A closed v2 item inventory supplies
+ordered associated data and an explicit opening operation: after validating
+the full parent binding and claimed Class A/C, it unwraps one item key and
+authenticates one payload. It returns opaque zeroizing bytes without I/O,
+key search, retry or implicit parsing.
+
+An explicit borrowed plaintext parser supports a bounded flat binary-plist
+subset and a narrow Internet password candidate with an integer-zero tombstone
+field. Independent synthetic fixtures verify graph-to-item-to-candidate
+composition and failures. These local checks do not authenticate account,
+scope or class claims, establish anchor trust, prove collection completeness,
+or retrieve records. Complete website record coverage, metadata sidecars,
+the account-to-credential path and live compatibility remain unverified. The
+items below remain incomplete.
 
  -  [ ] Retrieve CKKS zones and record changes.
  -  [ ] Recover the top-level key hierarchy.

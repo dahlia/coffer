@@ -1,17 +1,58 @@
-Offline CKKS v2 item associated data
-====================================
+Offline CKKS v2 item opening and associated data
+================================================
 
 `coffer_protocol::ckks::item::build_associated_data` validates a complete
 caller-supplied field inventory and constructs the associated data (AD) used
 by a narrow CKKS v2 item subset. Callers can pass its ordered component view
 to the existing `payload::decrypt` primitive with a separately selected item
-key and envelope. This module does no cryptography or I/O.
+key and envelope. The separate `item::open` operation borrows one resolved
+class key, unwraps the item key and decrypts the payload. Neither API performs
+I/O.
 
 The API checks the supplied metadata's structure. It cannot establish that an
 adapter actually supplied every original field or preserved its wire type.
 A caller must assert `FieldCompleteness::Complete` explicitly; incomplete
 input fails. Never build the inventory by dropping unsupported fields,
 collapsing duplicates in a map, or treating malformed input as absent.
+
+
+Explicit offline opening
+------------------------
+
+`item::open` takes the same item identity, record type, complete field inventory
+and completeness assertion as the AD builder, plus one `hierarchy::ResolvedKey`.
+A private validated record retains the exact borrowed parent reference,
+wrapped item key, envelope and AD from that inventory. No public validated
+handle can bypass preflight or substitute ciphertext after validation.
+
+Before any cryptography, the operation validates the entire inventory and
+requires the selected key's full `KeyId` to equal `parentkeyref`. Account,
+container, environment, database, zone owner/name and record name all compare
+exactly. The key must claim Class A or Class C; a TLK is rejected even when
+its bytes could unwrap the item key. These checks enforce caller-supplied
+bindings, not trusted account ownership or class semantics.
+
+Opening borrows the resolved key's existing zeroizing owner through a narrow
+internal accessor. It makes no raw class-key copy. It unwraps exactly the
+supplied 80-byte wrapped key once, then authenticates exactly the supplied
+envelope once with the validated AD. Unwrap failure returns a fixed error
+without attempting the payload. Payload failure returns no plaintext. There
+is no key search, alternative record, retry, fallback, cache or persistence.
+The transient item key is zeroized on drop before the operation returns,
+subject to the existing primitive's compiler/dependency limitations.
+
+Success returns the existing zeroizing `PayloadPlaintext`. The caller must
+explicitly call `plaintext::parse_ckks_plaintext` and then request the borrowed
+Internet password candidate if that representation is intended. Opening never
+calls the parser. The plaintext owner can outlive the selected key and graph;
+its parsed views cannot outlive that owner. Callers must drop it promptly.
+
+Success authenticates only the encoded components. In particular, scope,
+`uploadver`, omitted fields, class semantics, anchor trust, metadata freshness
+and collection completeness remain unauthenticated. A test consistently
+rebinds the graph and item to another invented account and still decrypts.
+This local composition neither retrieves records nor completes the M2
+account-to-credential path; live compatibility remains unverified.
 
 
 Typed input contract
@@ -105,8 +146,10 @@ about all compiler-generated copies or stack temporaries.
 Local resource limits
 ---------------------
 
-Bounds are checked before the result and its encoded integers are constructed.
-No input-controlled allocation, recursion, crypto attempt or retry occurs.
+Bounds are checked before the validated record and its encoded integers are
+constructed. The AD builder performs no input-controlled allocation or
+cryptography. Opening completes the same preflight and the key binding/class
+checks before either crypto attempt. No recursion or retry occurs.
 
 | Resource                      | Cap         |
 | ----------------------------- | ----------- |
@@ -159,12 +202,22 @@ bytes and the existing Coffer OpenSSL EVP recipe with an invented item key.
 Positive fixtures cover all PCS fields, no PCS fields and present empty Data;
 negative fixtures use nonce-last and concatenated AD. The decrypted bytes
 match the existing synthetic Internet-password plist with explicit padding.
-No class-key-to-item-key unwrap is added by these composition tests.
+Opening tests additionally reuse the independent A self-wrap, A-to-B class-key
+wrap and B-to-C item-key wrap in
+[the wrap fixtures](tests/fixtures/ckks-wrap/README.md). The public integration
+test resolves B in a two-node graph, opens the item with C and explicitly
+parses the byte-exact padded plist. Both claimed class values are tested; the
+website candidate borrows the returned plaintext. No fixture bytes were changed
+for this composition.
 
 Rust tests additionally check all optional PCS combinations, permutations,
 integer ranges, every known duplicate/wrong type, unknown empty fields,
 identity/scope and input caps, every envelope truncation/byte mutation, explicit
-redaction and owner lifetime. Malformed inventory returns no partial AD.
+redaction and owner lifetime. Opening counters check zero crypto calls for
+binding/class/shape failures, one unwrap and no payload call on unwrap failure,
+and one of each on payload failure. Every wrapped-key and envelope byte is
+corrupted in turn; every truncated length is checked. Failure cannot reach
+the test caller's explicit parser. Malformed inventory returns no partial AD.
 These results do not establish live Apple interoperability, complete CKKS
 record coverage, CloudKit transport, trusted key recovery or an authenticated
 account-to-credential path.

@@ -513,6 +513,12 @@ pub struct ResolvedKey<'a> {
 }
 
 impl ResolvedKey<'_> {
+    /// Borrows the existing zeroizing owner for the explicit item-opening step.
+    /// No raw key copy or ownership transfer occurs; the borrow ends with self.
+    pub(super) fn unwrapping_key(&self) -> &UnwrappingKey {
+        &self.key
+    }
+
     /// Returns the full claimed binding; never log its individual identifiers.
     #[must_use]
     pub fn id(&self) -> KeyId<'_> {
