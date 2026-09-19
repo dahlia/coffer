@@ -36,6 +36,9 @@
 /// Bounded, offline validation and selected-path key unwrapping.
 pub mod hierarchy;
 
+/// Bounded offline construction of known CKKS v2 item associated data.
+pub mod item;
+
 /// Bounded offline payload decryption with caller-ordered associated data.
 pub mod payload;
 
