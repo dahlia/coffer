@@ -137,9 +137,12 @@ Goal: obtain decrypted credential records without changing keychain contents.
 ### Octagon identity and trust
 
 Offline P-384 key encodings and ECDSA/SHA-384 verification are implemented
-with independent SEC 2/OpenSSL and RFC 6979 vectors. This subset does not
-generate peer identities, discover bottles, inspect recovery metadata, or
-change trust. Live Octagon interoperability remains unverified.
+with independent SEC 2/OpenSSL and RFC 6979 vectors. A bounded offline bottle
+parser preserves the original signed bytes and checks signatures against two
+embedded public keys. This proves self-consistency only, not identity, trust,
+viability or recovery. Independent synthetic fixtures cover the closed subset.
+It does not generate peer identities, discover bottles, decrypt private keys
+or change trust. Live Octagon interoperability remains unverified.
 
  -  [ ] Implement or integrate Octagon peer identity generation.
  -  [ ] Validate P-384 key serialization and signatures against public test

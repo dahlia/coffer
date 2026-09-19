@@ -19,7 +19,8 @@
 //! These types do not implement peer identity, trust, bottle recovery, or any
 //! network/session/storage operation. Successful cryptographic verification
 //! establishes no account or peer binding; callers must establish that separately.
-//! See `OCTAGON_KEYS.md` at the crate root for provenance, dependency rationale,
-//! and the deliberate offline scope.
+//! See `OCTAGON_KEYS.md` and `OCTAGON_BOTTLE.md` at the crate root for provenance,
+//! dependency rationale and the deliberate offline scope.
 
+pub mod bottle;
 pub mod keys;

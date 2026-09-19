@@ -55,7 +55,9 @@
 //! module provides offline key unwrapping and bounded key-hierarchy validation
 //! using a caller-supplied anchor; it does not establish anchor trust. The
 //! [`octagon`] module provides offline P-384 key encodings and ECDSA/SHA-384
-//! verification. CloudKit transport, Octagon peer identity and trust, and
+//! verification. Its bounded bottle inspector checks embedded-key signature
+//! self-consistency over original bytes, not trust, identity, entropy binding,
+//! viability or recovery. CloudKit transport, Octagon peer identity and trust, and
 //! credential retrieval remain later work.
 #![forbid(unsafe_code)]
 
