@@ -128,47 +128,36 @@ impl fmt::Display for ProtocolStatus {
 /// A server-chosen selector such as the `sp` password protocol or the `au`
 /// secondary-authentication step.
 ///
-/// Apple's selectors are short tokens (`s2k`, `trustedDeviceSecondaryAuth`).
-/// The raw, bounded value is always available through
-/// [`ServerSelector::as_str`], but `Display` and `Debug` print it only when it
-/// consists solely of ASCII letters, digits, `.`, `_`, and `-` and is at most
-/// [`ServerSelector::MAX_DISPLAY_LEN`] bytes; anything else is printed as
-/// `<redacted>` so that an error can be logged without reproducing arbitrary
-/// server text.
+/// The raw, bounded value is available through [`ServerSelector::as_str`]
+/// for explicit protocol matching. `Display` and `Debug` always redact it:
+/// even a short ASCII token may be an account identifier or secret echoed by
+/// the server. Character restrictions alone cannot make server text loggable.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServerSelector(String);
 
 impl ServerSelector {
-    /// Longest value that is shown verbatim by `Display` and `Debug`.
+    /// Former display-length bound, retained for source compatibility.
+    ///
+    /// This constant no longer controls output: every value is redacted.
     pub const MAX_DISPLAY_LEN: usize = 64;
 
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }
 
-    /// Returns the raw value.  Treat it as untrusted server output.
+    /// Returns the raw value for explicit protocol matching.
+    ///
+    /// Treat it as untrusted and potentially secret server output. Do not
+    /// log it or include it in errors; prefer fixed diagnostic categories.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    fn displayable(&self) -> bool {
-        !self.0.is_empty()
-            && self.0.len() <= Self::MAX_DISPLAY_LEN
-            && self
-                .0
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     }
 }
 
 impl fmt::Display for ServerSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.displayable() {
-            f.write_str(&self.0)
-        } else {
-            f.write_str("<redacted>")
-        }
+        f.write_str("<redacted>")
     }
 }
 

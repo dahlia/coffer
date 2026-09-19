@@ -433,8 +433,8 @@ pub struct UnsupportedStep {
 impl UnsupportedStep {
     /// Returns the server's `au` value, a bounded server-controlled string.
     ///
-    /// `Debug` on this type prints the value only when it is a plain token;
-    /// see [`ServerSelector`].
+    /// `Debug` always redacts the value; see [`ServerSelector`]. The raw
+    /// accessor is for explicit protocol matching, not logging.
     #[must_use]
     pub fn step(&self) -> &ServerSelector {
         &self.step

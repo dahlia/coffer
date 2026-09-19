@@ -265,7 +265,7 @@ fn unknown_secondary_auth_step_is_reported_not_guessed() {
     assert_eq!(step.step().as_str(), "synthetic.unsupported.step");
     assert_eq!(
         format!("{step:?}"),
-        "UnsupportedStep { step: ServerSelector(synthetic.unsupported.step) }"
+        "UnsupportedStep { step: ServerSelector(<redacted>) }"
     );
     assert_eq!(auth.transport().count(), 2);
 }
@@ -1450,14 +1450,72 @@ fn unsupported_selectors_with_arbitrary_text_are_redacted_from_errors() {
 }
 
 #[test]
-fn plain_selectors_are_shown_in_errors() {
+fn even_known_plain_selectors_are_redacted_in_errors() {
     let v = vector::compute();
     let init = edited(vector::init_response_dict(&v), |d| {
         d.insert("sp".to_owned(), Value::String("s2k_fo".to_owned()));
     });
     let auth = authenticator(vec![ok(init)]);
     let err = authenticate(&auth).unwrap_err();
-    assert!(err.to_string().contains("`s2k_fo`"), "{err}");
+    assert!(err.to_string().contains("`<redacted>`"));
+    assert!(!err.to_string().contains("s2k_fo"));
+}
+
+#[test]
+fn token_shaped_selectors_do_not_escape_through_nested_errors_or_outcomes() {
+    let v = vector::compute();
+    for selector in [
+        "123456789012345678",
+        "SyntheticToken_Abc-123.xyz",
+        "secondaryAuth",
+    ] {
+        let init = edited(vector::init_response_dict(&v), |d| {
+            d.insert("sp".to_owned(), Value::String(selector.to_owned()));
+        });
+        let auth = authenticator(vec![ok(init)]);
+        let error = authenticate(&auth).unwrap_err();
+        let AuthErrorKind::UnsupportedProtocol { protocol } = error.kind() else {
+            panic!("expected unsupported protocol");
+        };
+        assert_eq!(protocol.as_str(), selector);
+        for rendered in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{protocol}"),
+            format!("{protocol:?}"),
+        ] {
+            assert!(!rendered.contains(selector));
+            assert!(rendered.contains("<redacted>"));
+        }
+        assert_eq!(auth.transport().count(), 1);
+
+        let auth = authenticator(vec![
+            ok(vector::init_response(&v)),
+            ok(vector::complete_response(&v, Some(selector))),
+        ]);
+        let outcome = authenticate(&auth).unwrap();
+        assert!(!format!("{outcome:?}").contains(selector));
+        let LoginOutcome::Unsupported(step) = outcome else {
+            panic!("expected unsupported step");
+        };
+        assert_eq!(step.step().as_str(), selector);
+        assert!(!format!("{step:?}").contains(selector));
+        assert_eq!(auth.transport().count(), 2);
+
+        let mut script = two_factor_script(&v);
+        script[5] = ok(vector::complete_response(&v, Some(selector)));
+        let auth = authenticator(script);
+        let error = run_two_factor(&auth).unwrap_err();
+        assert_eq!(error.stage(), AuthStage::ReauthSrpComplete);
+        assert!(
+            matches!(error.kind(), AuthErrorKind::UnsupportedStep { step } if step.as_str() == selector)
+        );
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains(selector));
+            assert!(rendered.contains("<redacted>"));
+        }
+        assert_eq!(auth.transport().count(), 6);
+    }
 }
 
 // Trait object-safety shape: the traits are generic, never `dyn`.
