@@ -14,10 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Explicit disposable-account file input for the developer first-login harness.
+//! Explicit disposable-account file input for developer authentication harnesses.
 //!
-//! Construction performs no I/O. Only the exact first-login confirmation unlocks
-//! a single file read. OTP stays on the controlling terminal. No secret-bearing
+//! Construction performs no I/O. Only the selected mode's exact confirmation unlocks
+//! a single file read. Initial diagnostics refuse OTP and take the password once. No secret-bearing
 //! type implements `Debug`; all failures have fixed labels.
 
 use crate::terminal::{MAX_INPUT_LEN, SecureTerminal, TerminalError};
@@ -175,6 +175,12 @@ fn parse(bytes: &[u8]) -> Result<Credentials, FileInputError> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum FileMode {
+    FirstLogin,
+    InitialDiagnostic,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Confirmation,
     Account,
@@ -184,12 +190,13 @@ enum State {
     Finished,
 }
 
-/// File-backed input for exactly one [`crate::first_login::run`] invocation.
+/// File-backed input for one first-login or initial-only diagnostic invocation.
 ///
 /// Requires an explicitly selected disposable-account file outside the repository.
 /// The path is never printed. Confirmation and OTP use the wrapped secure TTY;
-/// each credential prompt is accepted once, with one optional post-2FA password
-/// handoff. Unknown, repeated, or out-of-order prompts wipe input and fail closed.
+/// first-login credentials allow one optional post-2FA password handoff.
+/// The separately selected diagnostic mode transfers the password once and
+/// refuses OTP or reauthentication. Unknown, repeated, or out-of-order prompts wipe input and fail closed.
 /// Buffers are zeroized on normal drop, not guaranteed after abrupt termination.
 /// No `Debug` implementation is provided.
 pub struct FileTerminal<T> {
@@ -197,6 +204,7 @@ pub struct FileTerminal<T> {
     path: Option<PathBuf>,
     password: Option<Zeroizing<String>>,
     state: State,
+    mode: FileMode,
 }
 impl<T: SecureTerminal> FileTerminal<T> {
     /// Retains the explicit path without opening or reading it.
@@ -211,7 +219,23 @@ impl<T: SecureTerminal> FileTerminal<T> {
             path: Some(path),
             password: None,
             state: State::Confirmation,
+            mode: FileMode::FirstLogin,
         }
+    }
+    /// Selects the closed initial-only diagnostic mode without reading the file.
+    ///
+    /// Only the diagnostic confirmation unlocks input. Password ownership is
+    /// transferred once; OTP and reauthentication never reach the wrapped TTY.
+    /// [`crate::initial_diagnostic::run_with`] calls finish before every return.
+    #[must_use]
+    pub fn for_initial_diagnostic(terminal: T, path: PathBuf) -> Self {
+        Self {
+            mode: FileMode::InitialDiagnostic,
+            ..Self::new(terminal, path)
+        }
+    }
+    pub(crate) fn is_initial_diagnostic(&self) -> bool {
+        self.mode == FileMode::InitialDiagnostic
     }
     /// Wipes retained input and permanently rejects further prompts.
     /// Fixed result notices remain available after this call.
@@ -244,14 +268,20 @@ impl<T: SecureTerminal> SecureTerminal for FileTerminal<T> {
         })
     }
     fn prompt_visible(&mut self, label: &'static str) -> Result<Zeroizing<String>, TerminalError> {
-        if self.state != State::Confirmation || label != crate::first_login::CONFIRM {
+        let (expected_label, expected_answer) = match self.mode {
+            FileMode::FirstLogin => (crate::first_login::CONFIRM, "LOGIN AND STORE"),
+            FileMode::InitialDiagnostic => {
+                (crate::initial_diagnostic::CONFIRM, "DIAGNOSE INITIAL AUTH")
+            }
+        };
+        if self.state != State::Confirmation || label != expected_label {
             return Err(self.fail());
         }
         self.state = State::Finished;
         let answer = self.terminal.prompt_visible(label).inspect_err(|_| {
             self.fail();
         })?;
-        if answer.as_str() == "LOGIN AND STORE" {
+        if answer.as_str() == expected_answer {
             self.state = State::Account;
         } else {
             self.finish();
@@ -271,6 +301,10 @@ impl<T: SecureTerminal> SecureTerminal for FileTerminal<T> {
                 self.password = Some(credentials.password);
                 self.state = State::Password;
                 Ok(credentials.email)
+            }
+            (State::Password, PASSWORD) if self.mode == FileMode::InitialDiagnostic => {
+                self.state = State::Finished;
+                self.password.take().ok_or_else(|| self.fail())
             }
             (State::Password, PASSWORD) => {
                 let password = self.password.clone().ok_or_else(|| self.fail())?;

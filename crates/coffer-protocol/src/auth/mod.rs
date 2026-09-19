@@ -115,12 +115,14 @@
 //! }
 //! ```
 
+pub mod diagnostic;
 mod error;
 pub(crate) mod gsa;
 mod spd;
 mod srp;
 
 use core::fmt;
+use diagnostic::{InitialAuthReport, InitialOutcome, InitialPhase, Observer, Verification};
 use std::collections::BTreeMap;
 
 use zeroize::{Zeroize, Zeroizing};
@@ -218,11 +220,22 @@ impl<T: Transport, A: AnisetteProvider, E: Entropy> Authenticator<T, A, E> {
 
     /// Sends one request and checks the HTTP status and body cap.
     async fn exchange(&self, stage: AuthStage, request: Request) -> Result<Response, AuthError> {
+        self.exchange_observed(stage, request, &mut Observer::default())
+            .await
+    }
+
+    async fn exchange_observed(
+        &self,
+        stage: AuthStage,
+        request: Request,
+        observer: &mut Observer,
+    ) -> Result<Response, AuthError> {
         let response = self
             .transport
             .send(request)
             .await
             .map_err(|e| AuthError::new(stage, AuthErrorKind::Transport(e)))?;
+        observer.http(response.status());
         if !response.is_success() {
             return Err(AuthError::new(
                 stage,
@@ -271,26 +284,36 @@ async fn run_srp<T: Transport, A: AnisetteProvider, E: Entropy>(
     account: &AccountName,
     password: Password,
     stages: SrpStages,
+    observer: &mut Observer,
 ) -> Result<(ServerProvidedData, Option<String>), AuthError> {
     let limits = &auth.limits;
     let at_init = |kind| AuthError::new(stages.init, kind);
     let at_complete = |kind| AuthError::new(stages.complete, kind);
 
+    observer.phase(InitialPhase::Init);
     // Round 1: send A, receive salt, B, iteration count, and cookie.
     let anisette = auth.fresh_anisette(stages.init).await?;
     let ephemeral =
         ClientEphemeral::generate(&auth.entropy).map_err(|e| at_init(AuthErrorKind::Entropy(e)))?;
     let request =
         gsa::init_request(&anisette, account, ephemeral.public(), limits).map_err(at_init)?;
-    let response = auth.exchange(stages.init, request).await?;
+    let response = auth
+        .exchange_observed(stages.init, request, observer)
+        .await?;
     let root = gsa::parse_body(response.body(), limits)
         .map_err(|m| at_init(AuthErrorKind::Malformed(m)))?;
-    let section = gsa::response_section(&root).map_err(|m| at_init(AuthErrorKind::Malformed(m)))?;
+    let section = gsa::response_section(&root).map_err(|m| {
+        observer.invalid_location();
+        at_init(AuthErrorKind::Malformed(m))
+    })?;
+    observer.status(section, limits);
+    observer.status_accepted(Verification::Failed);
     let status =
         gsa::parse_status(section, limits).map_err(|m| at_init(AuthErrorKind::Malformed(m)))?;
     status
         .into_result()
         .map_err(|s| at_init(AuthErrorKind::Protocol(s)))?;
+    observer.status_accepted(Verification::Passed);
     let init =
         gsa::parse_init(section, limits).map_err(|m| at_init(AuthErrorKind::Malformed(m)))?;
     if let Some(protocol) = init.protocol
@@ -309,29 +332,41 @@ async fn run_srp<T: Transport, A: AnisetteProvider, E: Entropy>(
     drop(password_key);
     drop(ephemeral);
 
+    observer.phase(InitialPhase::Complete);
     // Round 2: send M1, receive M2 and the encrypted server-provided data.
     let request = gsa::complete_request(&anisette, account, proof.m1(), &init.cookie, limits)
         .map_err(at_complete)?;
-    let response = auth.exchange(stages.complete, request).await?;
+    let response = auth
+        .exchange_observed(stages.complete, request, observer)
+        .await?;
     let root = gsa::parse_body(response.body(), limits)
         .map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
-    let section =
-        gsa::response_section(&root).map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
+    let section = gsa::response_section(&root).map_err(|m| {
+        observer.invalid_location();
+        at_complete(AuthErrorKind::Malformed(m))
+    })?;
+    observer.status(section, limits);
+    observer.status_accepted(Verification::Failed);
     let status =
         gsa::parse_status(section, limits).map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
     let secondary_auth = status
         .into_result()
         .map_err(|s| at_complete(AuthErrorKind::Protocol(s)))?;
+    observer.status_accepted(Verification::Passed);
     let complete = gsa::parse_complete(section, limits)
         .map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
+    observer.proof(Verification::Failed);
     let session_key = proof
         .verify_server(&complete.m2)
         .ok_or_else(|| at_complete(AuthErrorKind::ServerProofMismatch))?;
+    observer.proof(Verification::Passed);
+    observer.spd(Verification::Failed);
     let plaintext = spd::decrypt(&session_key, &complete.encrypted_data)
         .map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
     drop(session_key);
     let data =
         spd::parse(&plaintext, limits).map_err(|m| at_complete(AuthErrorKind::Malformed(m)))?;
+    observer.spd(Verification::Passed);
     Ok((data, secondary_auth))
 }
 
@@ -346,6 +381,58 @@ pub struct PasswordLogin<'a, T, A, E> {
 }
 
 impl<'a, T: Transport, A: AnisetteProvider, E: Entropy> PasswordLogin<'a, T, A, E> {
+    /// Consumes one initial SRP attempt and returns only finite observations.
+    ///
+    /// Reuses the ordinary initial parser, cryptography, and request builders:
+    /// at most one init and one complete, with no retry. Password and decrypted
+    /// server data are dropped before return, even on success. No session or
+    /// second-factor capability is constructed. No code, reauthentication,
+    /// token, recovery, or trust operation is performed.
+    ///
+    /// All failures become a failed report; raw protocol/transport errors are
+    /// discarded. Status observations are untrusted until proof/SPD validation
+    /// passes. Calling this live needs a separate explicit user action because
+    /// even an incomplete attempt may affect account protection.
+    ///
+    /// The attempt cannot be consumed again:
+    ///
+    /// ```compile_fail,E0382
+    /// use coffer_protocol::{auth::PasswordLogin, anisette::AnisetteProvider,
+    ///     entropy::Entropy, transport::Transport};
+    /// async fn twice<T: Transport, A: AnisetteProvider, E: Entropy>(login: PasswordLogin<'_, T, A, E>) {
+    ///     let _ = login.diagnose_initial().await;
+    ///     let _ = login.authenticate().await;
+    /// }
+    /// ```
+    pub async fn diagnose_initial(self) -> InitialAuthReport {
+        let Self {
+            auth,
+            account,
+            password,
+        } = self;
+        let mut observer = Observer(Some(InitialAuthReport::default()));
+        let result = run_srp(auth, &account, password, INITIAL_STAGES, &mut observer).await;
+        let outcome = match result {
+            Ok((data, selector)) => {
+                drop(data);
+                match selector.as_deref() {
+                    None => InitialOutcome::CompleteWithoutSecondary,
+                    Some(gsa::TRUSTED_DEVICE_AU) => InitialOutcome::TrustedDeviceRequired,
+                    Some(_) => InitialOutcome::Unsupported,
+                }
+            }
+            Err(error) => {
+                if let Some(report) = &mut observer.0 {
+                    report.failure = diagnostic::Failure::classify(error.kind());
+                }
+                InitialOutcome::Failed
+            }
+        };
+        let mut report = observer.0.unwrap_or_default();
+        report.outcome = outcome;
+        report
+    }
+
     /// Runs the initial SRP password exchange.
     ///
     /// Sends the `init` and `complete` requests and, on success, returns
@@ -366,7 +453,14 @@ impl<'a, T: Transport, A: AnisetteProvider, E: Entropy> PasswordLogin<'a, T, A, 
             account,
             password,
         } = self;
-        let (data, secondary_auth) = run_srp(auth, &account, password, INITIAL_STAGES).await?;
+        let (data, secondary_auth) = run_srp(
+            auth,
+            &account,
+            password,
+            INITIAL_STAGES,
+            &mut Observer::default(),
+        )
+        .await?;
         match secondary_auth {
             None => Ok(LoginOutcome::Authenticated(Session::new(account, data))),
             Some(step) if step == gsa::TRUSTED_DEVICE_AU => {
@@ -590,7 +684,14 @@ impl<T: Transport, A: AnisetteProvider, E: Entropy> SecondFactorVerified<'_, T, 
     /// back to another code request.
     pub async fn reauthenticate(self, password: Password) -> Result<Session, AuthError> {
         let Self { auth, account } = self;
-        let (data, secondary_auth) = run_srp(auth, &account, password, REAUTH_STAGES).await?;
+        let (data, secondary_auth) = run_srp(
+            auth,
+            &account,
+            password,
+            REAUTH_STAGES,
+            &mut Observer::default(),
+        )
+        .await?;
         match secondary_auth {
             None => Ok(Session::new(account, data)),
             Some(step) if step == gsa::TRUSTED_DEVICE_AU => Err(AuthError::new(

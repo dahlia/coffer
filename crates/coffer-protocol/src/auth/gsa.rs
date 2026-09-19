@@ -422,6 +422,15 @@ pub(crate) struct Status {
     pub secondary_auth: Option<String>,
 }
 
+/// Shares the exact status location policy with finite diagnostic observation.
+pub(super) fn status_dictionary(dict: &Dictionary) -> Result<&Dictionary, Malformed> {
+    match dict.get("Status") {
+        Some(Value::Dictionary(status)) => Ok(status),
+        Some(_) => Err(Malformed::new("Status", MalformedReason::WrongType)),
+        None => Ok(dict),
+    }
+}
+
 /// Parses the `Status` dictionary.
 ///
 /// The password-exchange responses nest `Status` inside `Response`; the
@@ -432,11 +441,7 @@ pub(crate) fn parse_status(
     dict: &Dictionary,
     limits: &ResponseLimits,
 ) -> Result<Status, Malformed> {
-    let status = match dict.get("Status") {
-        Some(Value::Dictionary(status)) => status,
-        Some(_) => return Err(Malformed::new("Status", MalformedReason::WrongType)),
-        None => dict,
-    };
+    let status = status_dictionary(dict)?;
     let code = get_integer(status, "ec")?;
     let message = match status.get("em") {
         None => String::new(),

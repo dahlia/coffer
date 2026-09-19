@@ -682,3 +682,100 @@ literal parsing, bounds, metadata, symlinks, FIFO rejection, confirmation order,
 OTP and one-time post-2FA handoff, failure paths and CLI rejection. No real
 credential file, account, Apple endpoint or Secret Service was accessed to
 implement or validate this adapter; live compatibility remains unverified.
+
+
+Initial-only file diagnostic
+----------------------------
+
+`coffer-live-auth-initial-file` runs only the initial SRP password exchange
+and prints a finite diagnostic report. Build it and its helper without running
+either:
+
+~~~~ sh
+mise run build-live-auth-initial-file
+~~~~
+
+After independent review, full CI, and separate approval for the exact one-run
+plan, invoke the built binary with `--credentials-file PATH`. The path selects
+an explicitly approved disposable-account file; it must not contain credentials
+itself. No profile argument is accepted. There is no live mise task and no live
+execution in ordinary tests or CI. The build task and the TTY confirmation do
+not grant approval to consume another authentication attempt.
+
+Preparation opens only existing verified support libraries and local
+provisioning through the stored-session harness's `installed`/`open_existing`
+preparation, with downloads disabled. It does not load a session or contact
+Secret Service. Missing local state stops before credential input. Only the
+exact controlling-TTY confirmation `DIAGNOSE INITIAL AUTH` permits a single
+read through the same private metadata checks and bounded literal parser as the
+first-login file adapter above. The initial password is transferred once and
+immediately removed from the adapter; OTP and reauthentication prompts are
+refused.
+
+The consuming `PasswordLogin::diagnose_initial` API reuses the existing SRP
+builders, bounded response parser, server-proof verification, and SPD
+decryption. SPD is the encrypted server-provided authentication data. At most
+one `init` and one `complete` request are sent. A private transport allows only
+POST to the existing GSA password endpoint and closes its budget before
+dispatch; failure, cancellation, concurrent calls, and a third call cannot
+restore it. The existing TLS, redirect, proxy, challenge, body-bound, and
+deadline policies remain in force: 60 seconds per exchange and 20 minutes from
+the first exchange. There is one anisette generation in SRP, with no extra
+preflight generation.
+
+Every result ends the run. Even a result without a secondary requirement drops
+its decrypted data without constructing a session. There is no code request or
+submission, post-2FA authentication, token/delegate issuance, URL visit,
+recovery, trust change, CKKS operation, or Secret Service read/write/delete.
+The original file-login binary retains its existing behavior.
+
+The report contains two fixed response slots and payload-free enums for HTTP
+class, status location, `ec`, `hsc`, `au`, validation progress, and a fixed
+failure category. The category distinguishes anisette, entropy, transport,
+HTTP, protocol, malformed data, unsupported password protocol, proof, and
+internal failures; unknown error variants use a fixed fallback. It includes no
+raw selector, message, arbitrary status number, URL, hash, or length. An
+unavailable transport response is `NotObserved`, not an inferred HTTP status.
+Status fields are observed before their validation; `Passed` is set only after
+the corresponding check succeeds. SRP proof verification does not independently
+authenticate the status dictionary, nor does an observed shape identify the
+account's policy. `hsc` is diagnostic-only and never affects authentication.
+
+Selector matching is exact, without case, whitespace, or Unicode normalization.
+Only the URL-like heuristic ignores ASCII case in an `http://` or `https://`
+prefix; it neither validates nor retains a URL. Numeric strings are not coerced
+into `hsc` integers. Missing and empty selectors remain distinct. Unsupported
+selectors, including `repair`, never grant a continuation capability.
+
+The existing plist parser collapses duplicate dictionary keys to the last
+value. Synthetic duplicate-`au` tests confirm that both ordinary authentication
+and diagnostics observe only that surviving value. The report cannot establish
+raw-wire uniqueness or recover discarded duplicate fields. This limitation must
+be reviewed before any live diagnostic; this change does not replace the parser
+or silently change ordinary authentication semantics.
+
+Public constants follow the facts recorded in the design report: the existing
+[SideStore selectors], the exact `repair` selector in [isideload], and
+historical `hsc` integers 200/409/433/434 discussed in [Blackwood]. These pins
+are behavioral references, not an Apple specification or evidence about the
+current account. The URL-prefix rule is a Coffer heuristic. No source from
+those projects was copied, translated, or adapted. The synthetic candidates are
+not Apple captures.
+
+An initial SRP attempt can affect rate limiting, account protection, or server
+notifications even without an OTP endpoint call. Local anisette generation can
+update existing provisioning state. Normal returns finish the input adapter and
+drop owned credentials/SPD before reporting; the plaintext file is not deleted
+or modified. Signals, forced termination, and external-library/kernel buffers
+prevent any promise of complete memory erasure. A timeout does not prove that
+Apple did not process a request and never permits an automatic rerun.
+
+Offline tests do not recover the unknown selector from the previous attempt or
+establish its cause, a repair procedure, CloudKit access, or Milestone 2
+completion. A future live attempt requires a new explicit approval after the
+final revision, independent review, full CI, request budget, input path, local
+identity, limited information value, and parser limitation have been reviewed.
+
+[SideStore selectors]: https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/icloud-auth/src/client.rs#L498-L504
+[isideload]: https://github.com/nab138/isideload/blob/b6d111376657a59207ac26c8ef8be5cca8793cba/isideload/src/auth/apple_account.rs
+[Blackwood]: https://github.com/ionescu007/Blackwood-4NT/blob/e02e4d7fc8f3ae7fcb24ae20438133957a208058/README.md

@@ -1520,3 +1520,277 @@ fn token_shaped_selectors_do_not_escape_through_nested_errors_or_outcomes() {
 
 // Trait object-safety shape: the traits are generic, never `dyn`.
 fn _assert_send_sync<T: Transport + AnisetteProvider + Entropy>() {}
+
+// Initial-only diagnostics use the same synthetic server and request bytes.
+#[test]
+fn initial_diagnostic_is_finite_and_preserves_the_initial_wire() {
+    use coffer_protocol::auth::diagnostic::{Au, InitialOutcome, Verification};
+    let v = vector::compute();
+    for (selector, au, outcome) in [
+        (None, Au::Absent, InitialOutcome::CompleteWithoutSecondary),
+        (
+            Some(TRUSTED),
+            Au::TrustedDevice,
+            InitialOutcome::TrustedDeviceRequired,
+        ),
+        (
+            Some("secondaryAuth"),
+            Au::Secondary,
+            InitialOutcome::Unsupported,
+        ),
+        (Some("repair"), Au::Repair, InitialOutcome::Unsupported),
+        (
+            Some("HTTPS://synthetic.invalid/?private=sentinel"),
+            Au::HttpUrlLike,
+            InitialOutcome::Unsupported,
+        ),
+        (
+            Some("synthetic-secret-selector"),
+            Au::OtherString,
+            InitialOutcome::Unsupported,
+        ),
+        (Some(""), Au::Empty, InitialOutcome::Unsupported),
+    ] {
+        let script = || {
+            vec![
+                ok(vector::init_response(&v)),
+                ok(vector::complete_response(&v, selector)),
+            ]
+        };
+        let auth = authenticator(script());
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        assert_eq!(report.outcome, outcome);
+        assert_eq!(report.complete.au, au);
+        assert_eq!(report.complete.status_accepted, Verification::Passed);
+        assert_eq!(report.proof_verified, Verification::Passed);
+        assert_eq!(report.spd_parsed, Verification::Passed);
+        assert_no_secrets(&format!("{report:?}"));
+        assert!(!format!("{report:?}").contains("sentinel"));
+        assert!(!format!("{report:?}").contains("synthetic-secret-selector"));
+        let normal = authenticator(script());
+        drop(authenticate(&normal).unwrap());
+        let actual = auth.transport().requests();
+        let expected = normal.transport().requests();
+        assert_eq!(actual.len(), 2);
+        for ((actual, expected), operation) in
+            actual.iter().zip(&expected).zip(["init", "complete"])
+        {
+            assert_eq!(actual.method, expected.method);
+            assert_eq!(actual.url, expected.url);
+            assert_eq!(actual.headers, expected.headers);
+            assert_eq!(actual.body, expected.body);
+            let root = Value::from_reader_xml(actual.body.as_ref().unwrap().as_slice()).unwrap();
+            assert_eq!(
+                root.as_dictionary().unwrap()["Request"]
+                    .as_dictionary()
+                    .unwrap()["o"]
+                    .as_string(),
+                Some(operation)
+            );
+        }
+    }
+}
+
+#[test]
+fn initial_diagnostic_stops_at_proof_and_spd_failures() {
+    use coffer_protocol::auth::diagnostic::{InitialOutcome, Verification};
+    let v = vector::compute();
+    for proof_bad in [true, false] {
+        let mut complete = vector::complete_response_dict(&v, Some("repair"));
+        if proof_bad {
+            complete.insert("M2".into(), Value::Data(vec![0; 32]));
+        } else {
+            complete.insert("spd".into(), Value::Data(vec![0; 16]));
+        }
+        let auth = authenticator(vec![
+            ok(vector::init_response(&v)),
+            ok(vector::plist_bytes(vector::envelope(complete))),
+        ]);
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        assert_eq!(report.outcome, InitialOutcome::Failed);
+        assert_eq!(
+            report.proof_verified,
+            if proof_bad {
+                Verification::Failed
+            } else {
+                Verification::Passed
+            }
+        );
+        assert_eq!(
+            report.spd_parsed,
+            if proof_bad {
+                Verification::NotReached
+            } else {
+                Verification::Failed
+            }
+        );
+        assert_eq!(auth.transport().count(), 2);
+    }
+}
+
+#[test]
+fn initial_diagnostic_does_not_invent_unobserved_fields_or_retry() {
+    use coffer_protocol::auth::diagnostic::{Au, HttpClass, InitialOutcome, Verification};
+    for (step, http) in [
+        (Step::Fail(TransportError::Timeout), HttpClass::NotObserved),
+        (
+            reply(503, b"synthetic-private-error"),
+            HttpClass::ServerError,
+        ),
+        (ok(b"broken XML"), HttpClass::Success),
+    ] {
+        let auth = authenticator(vec![step]);
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        assert_eq!(report.outcome, InitialOutcome::Failed);
+        assert_eq!(report.init.http, http);
+        assert_eq!(report.init.au, Au::NotObserved);
+        assert_eq!(report.complete.http, HttpClass::NotObserved);
+        assert_eq!(report.proof_verified, Verification::NotReached);
+        assert_eq!(auth.transport().count(), 1);
+    }
+    let auth = Authenticator::new(
+        ScriptedTransport::new(vec![]),
+        BrokenAnisette,
+        BrokenEntropy,
+    );
+    let report = block_on(auth.login(account(), password()).diagnose_initial());
+    assert_eq!(report.init.http, HttpClass::NotObserved);
+    assert_eq!(auth.transport().count(), 0);
+}
+
+#[test]
+fn initial_diagnostic_status_validation_and_parser_failures_keep_normal_semantics() {
+    use coffer_protocol::auth::diagnostic::{
+        Au, Ec, Hsc, InitialOutcome, StatusLocation, Verification,
+    };
+    let v = vector::compute();
+    for (field, value, fails) in [
+        ("hsc", Value::String("433".into()), false),
+        ("ec", Value::Integer((-87654321).into()), true),
+        ("ec", Value::String("0".into()), true),
+        ("au", Value::Integer(987654321.into()), true),
+        ("au", Value::String("x".repeat(1025)), true),
+        ("em", Value::Integer(0.into()), true),
+    ] {
+        let mut complete = vector::complete_response_dict(&v, Some("repair"));
+        let status = complete
+            .get_mut("Status")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap();
+        status.insert(field.into(), value);
+        status.insert("ed".into(), Value::String("private-sentinel".into()));
+        let body = vector::plist_bytes(vector::envelope(complete));
+        let script = || vec![ok(vector::init_response(&v)), ok(body.clone())];
+        let auth = authenticator(script());
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        let normal = authenticator(script());
+        assert_eq!(authenticate(&normal).is_err(), fails);
+        assert_eq!(report.outcome == InitialOutcome::Failed, fails);
+        assert_eq!(
+            report.complete.status_accepted,
+            if fails {
+                Verification::Failed
+            } else {
+                Verification::Passed
+            }
+        );
+        assert_eq!(
+            report.proof_verified,
+            if fails {
+                Verification::NotReached
+            } else {
+                Verification::Passed
+            }
+        );
+        assert_eq!(report.complete.location, StatusLocation::NestedStatus);
+        if field == "hsc" {
+            assert_eq!(report.complete.hsc, Hsc::InvalidType);
+        }
+        assert!(!format!("{report:?}").contains("private-sentinel"));
+        assert!(!format!("{report:?}").contains("87654321"));
+        assert_eq!(auth.transport().count(), 2);
+    }
+    let malformed_bodies = [
+        b"<plist><dict>".to_vec(),
+        vec![b'x'; ResponseLimits::default().max_body + 1],
+        format!(
+            "<plist>{}{}{}</plist>",
+            "<array>".repeat(1000),
+            "<string>x</string>",
+            "</array>".repeat(1000)
+        )
+        .into_bytes(),
+    ];
+    for body in malformed_bodies {
+        let auth = authenticator(vec![Step::ReplyUncapped { status: 200, body }]);
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        assert_eq!(report.init.au, Au::NotObserved);
+        assert_eq!(report.init.ec, Ec::NotObserved);
+        assert_eq!(report.proof_verified, Verification::NotReached);
+        assert_eq!(auth.transport().count(), 1);
+    }
+}
+
+#[test]
+fn initial_diagnostic_duplicate_keys_observe_only_the_existing_parser_survivor() {
+    use coffer_protocol::auth::diagnostic::{Au, Ec, Hsc, InitialOutcome};
+    let v = vector::compute();
+    let body = String::from_utf8(vector::complete_response(&v, Some("repair")))
+        .unwrap()
+        .replace(
+            "<key>au</key>",
+            "<key>au</key><string>discarded-synthetic-selector</string><key>au</key>",
+        ).replace("<key>ec</key>", "<key>ec</key><integer>-987654321</integer><key>hsc</key><integer>433</integer><key>hsc</key><integer>434</integer><key>ec</key>");
+    let auth = authenticator(vec![ok(vector::init_response(&v)), ok(body.as_bytes())]);
+    let report = block_on(auth.login(account(), password()).diagnose_initial());
+    assert_eq!(report.complete.au, Au::Repair);
+    assert_eq!(report.complete.ec, Ec::Zero);
+    assert_eq!(report.complete.hsc, Hsc::Integer434);
+    assert_eq!(report.outcome, InitialOutcome::Unsupported);
+    let normal = authenticator(vec![ok(vector::init_response(&v)), ok(body.as_bytes())]);
+    let LoginOutcome::Unsupported(step) = authenticate(&normal).unwrap() else {
+        panic!("existing parser changed");
+    };
+    assert_eq!(step.step().as_str(), "repair");
+    assert_eq!(auth.transport().count(), 2);
+}
+
+#[test]
+fn initial_diagnostic_failure_kind_discards_error_payloads() {
+    use coffer_protocol::auth::diagnostic::Failure;
+    let auth = Authenticator::new(
+        ScriptedTransport::new(vec![]),
+        BrokenAnisette,
+        BrokenEntropy,
+    );
+    assert_eq!(
+        block_on(auth.login(account(), password()).diagnose_initial()).failure,
+        Failure::Anisette
+    );
+    let auth = Authenticator::new(ScriptedTransport::new(vec![]), FixedAnisette, BrokenEntropy);
+    assert_eq!(
+        block_on(auth.login(account(), password()).diagnose_initial()).failure,
+        Failure::Entropy
+    );
+    for (step, expected) in [
+        (
+            Step::Fail(TransportError::Other {
+                detail: "SyntheticPrivateFailure987654321".into(),
+            }),
+            Failure::Transport,
+        ),
+        (
+            reply(599, b"SyntheticPrivateFailure987654321"),
+            Failure::Http,
+        ),
+        (ok(vector::init_response_error()), Failure::Protocol),
+        (ok(b"not plist"), Failure::Malformed),
+    ] {
+        let auth = authenticator(vec![step]);
+        let report = block_on(auth.login(account(), password()).diagnose_initial());
+        assert_eq!(report.failure, expected);
+        assert!(!format!("{report:?}").contains("SyntheticPrivateFailure987654321"));
+        assert_eq!(auth.transport().count(), 1);
+    }
+}

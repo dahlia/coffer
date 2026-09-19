@@ -77,6 +77,7 @@ pub mod file_input;
 pub mod first_login;
 pub mod flow;
 pub mod harness;
+pub mod initial_diagnostic;
 pub mod op_input;
 pub mod reuse;
 pub mod slot;
@@ -132,6 +133,11 @@ mod tests {
             ("delegate_main.rs", include_str!("delegate_main.rs")),
             ("delegate_op_main.rs", include_str!("delegate_op_main.rs")),
             ("file_input.rs", include_str!("file_input.rs")),
+            (
+                "initial_diagnostic.rs",
+                include_str!("initial_diagnostic.rs"),
+            ),
+            ("initial_file_main.rs", include_str!("initial_file_main.rs")),
             ("login_file_main.rs", include_str!("login_file_main.rs")),
             ("first_login.rs", include_str!("first_login.rs")),
             ("login_op_main.rs", include_str!("login_op_main.rs")),

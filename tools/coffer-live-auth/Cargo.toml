@@ -73,3 +73,7 @@ tempfile = { version = "3.27.0", default-features = false }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "coffer-live-auth-initial-file"
+path = "src/initial_file_main.rs"

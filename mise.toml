@@ -165,3 +165,7 @@ run = "cargo-deny --locked check"
 [tasks.ci]
 description = "Complete verification gate; must match continuous integration"
 depends = ["check", "build", "test", "doc", "deny"]
+
+[tasks.build-live-auth-initial-file]
+description = "Build the initial-only file diagnostic without executing it"
+run = "cargo build --locked -p coffer-anisette -p coffer-live-auth --bin coffer-anisette-helper --bin coffer-live-auth-initial-file"

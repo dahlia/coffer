@@ -82,3 +82,15 @@ The same with a synthetic unknown `au` value.
 
 Top-level `ec`/`em` responses of the validate endpoint. The rejection code is
 synthetic.
+
+Initial-only diagnostic tests reuse the synthetic SRP vector and GSA replies
+above. Test code changes only synthetic status fields, proof/ciphertext failure
+cases, and malformed XML; no new Apple captures are added. The exact `repair`
+label follows the behavioral fact recorded at isideload commit
+`b6d111376657a59207ac26c8ef8be5cca8793cba`, in
+*isideload/src/auth/apple\_account.rs*. Historical `hsc` constants follow
+Blackwood commit `e02e4d7fc8f3ae7fcb24ae20438133957a208058`, in *README.md*.
+These constants do not identify the cause of a live authentication failure. No
+reference source was copied, translated, or adapted. Duplicate-key tests
+deliberately retain the existing parser's last-value behavior; reports describe
+only the surviving dictionary value.

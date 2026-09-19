@@ -329,3 +329,72 @@ fn file_errors_are_redacted_and_never_fall_back_to_tty() {
     assert_eq!(seen.borrow().notices, ["credential file format rejected"]);
     assert_eq!(seen.borrow().prompts, [crate::first_login::CONFIRM]);
 }
+
+struct DiagnosticTerminal(Rc<RefCell<Events>>);
+impl SecureTerminal for DiagnosticTerminal {
+    fn notice(&mut self, text: &'static str) -> Result<(), TerminalError> {
+        Terminal(self.0.clone()).notice(text)
+    }
+    fn prompt_visible(&mut self, label: &'static str) -> Result<Zeroizing<String>, TerminalError> {
+        self.0.borrow_mut().prompts.push(label);
+        if self.0.borrow().cancel {
+            return Err(TerminalError::Interrupted);
+        }
+        Ok(Zeroizing::new(
+            if self.0.borrow().decline {
+                "no"
+            } else {
+                "DIAGNOSE INITIAL AUTH"
+            }
+            .into(),
+        ))
+    }
+    fn prompt_hidden(&mut self, _: &'static str) -> Result<Zeroizing<String>, TerminalError> {
+        panic!("diagnostic must not forward hidden prompts");
+    }
+}
+
+#[test]
+fn initial_diagnostic_confirmation_is_separate_and_password_is_taken_once() {
+    let (_dir, path) = fixture(INPUT);
+    let seen = Rc::new(RefCell::new(Events::default()));
+    let mut input =
+        FileTerminal::for_initial_diagnostic(DiagnosticTerminal(seen.clone()), path.clone());
+    input
+        .prompt_visible(crate::initial_diagnostic::CONFIRM)
+        .unwrap();
+    input.prompt_hidden(ACCOUNT).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        input.prompt_hidden(PASSWORD).unwrap().as_str(),
+        "synthetic-password"
+    );
+    assert!(input.password.is_none());
+    assert!(input.path.is_none());
+    for prompt in [PASSWORD, OTP, REAUTH, ACCOUNT] {
+        assert!(input.prompt_hidden(prompt).is_err());
+    }
+    assert_eq!(seen.borrow().prompts, [crate::initial_diagnostic::CONFIRM]);
+}
+
+#[test]
+fn initial_diagnostic_decline_cancel_and_wrong_confirmation_never_read() {
+    for scenario in 0..3 {
+        let seen = Rc::new(RefCell::new(Events::default()));
+        seen.borrow_mut().decline = scenario == 0;
+        seen.borrow_mut().cancel = scenario == 1;
+        let mut input = FileTerminal::for_initial_diagnostic(
+            DiagnosticTerminal(seen.clone()),
+            PathBuf::from("synthetic-nonexistent"),
+        );
+        let _ = input.prompt_visible(if scenario == 2 {
+            crate::first_login::CONFIRM
+        } else {
+            crate::initial_diagnostic::CONFIRM
+        });
+        assert!(input.prompt_hidden(ACCOUNT).is_err());
+        assert!(seen.borrow().notices.is_empty());
+        assert!(input.password.is_none());
+        assert!(input.path.is_none());
+    }
+}
