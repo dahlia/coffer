@@ -185,6 +185,10 @@ impl HarnessError {
                     auth_stage_label(error.stage()),
                     auth_kind_label(error.kind()),
                 ),
+                FlowError::SecondaryAuthUnsupported => (
+                    "secondary authentication",
+                    "the server selected secondaryAuth; this flow is unsupported; stopped",
+                ),
                 FlowError::UnsupportedStep => (
                     "secondary authentication",
                     "the server requires a step other than a trusted-device code; stopped",

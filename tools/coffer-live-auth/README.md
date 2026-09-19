@@ -50,6 +50,17 @@ its own timeout. Later 2FA/password prompts consume the remaining total budget;
 they do not reset it. A timeout alone does not prove server rejection or even
 that the current request reached Apple. No failure triggers another attempt.
 
+After the initial password exchange, the exact public selector `secondaryAuth`
+is reported with a fixed message and stops the run. The pinned
+[SideStore client] classifies this selector as SMS authentication; the message
+proves neither SMS delivery nor the account's state. Other unsupported
+selectors retain the generic failure message, without printing their values.
+Neither case requests a code, retries authentication, or stores a session.
+This distinction does not recover the selector from earlier runs, and does
+not change the separate post-2FA failure diagnostics.
+
+[SideStore client]: https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/icloud-auth/src/client.rs#L498-L504
+
 
 Human interaction points
 ------------------------

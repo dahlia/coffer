@@ -24,6 +24,7 @@
 //!   ├─ SecondFactorRequired ─▶ request code (once) ─▶ hidden code prompt
 //!   │     ─▶ submit code (once) ─▶ NEW hidden password prompt
 //!   │     ─▶ reauthenticate (once) ────────────────────────────▶ session
+//!   ├─ SecondaryAuthUnsupported ─────────────────────────────────▶ stop
 //!   └─ Unsupported ─────────────────────────────────────────────▶ stop
 //! ```
 //!
@@ -77,6 +78,9 @@ pub enum LoginResult<L: LoginStep> {
     Authenticated(L::Session),
     /// A trusted-device code is required.
     SecondFactorRequired(L::SecondFactor),
+    /// The exact public `secondaryAuth` selector was received.
+    /// This is diagnostic only; no SMS request is made.
+    SecondaryAuthUnsupported,
     /// The server asked for a step this harness does not perform.
     Unsupported,
 }
@@ -170,6 +174,8 @@ pub enum FlowError<E> {
     /// The server requires a secondary authentication step other than a
     /// trusted-device code.  The harness does not guess at it.
     UnsupportedStep,
+    /// The exact `secondaryAuth` selector was received; no follow-up is made.
+    SecondaryAuthUnsupported,
 }
 
 impl<E: fmt::Display> fmt::Display for FlowError<E> {
@@ -179,6 +185,9 @@ impl<E: fmt::Display> fmt::Display for FlowError<E> {
             Self::InvalidAccountName(error) => write!(f, "{error}; nothing was sent"),
             Self::InvalidCode(error) => write!(f, "{error}; the code was not submitted"),
             Self::Auth(error) => write!(f, "{error}"),
+            Self::SecondaryAuthUnsupported => {
+                f.write_str("the server selected secondaryAuth; this flow is unsupported; stopped")
+            }
             Self::UnsupportedStep => f.write_str(
                 "the server requires a secondary authentication step other than a \
                  trusted-device code; the harness stops here",
@@ -233,6 +242,7 @@ pub async fn run_login<L: LoginStep, T: SecureTerminal>(
         }
         LoginResult::SecondFactorRequired(second_factor) => second_factor,
         LoginResult::Unsupported => return Err(FlowError::UnsupportedStep),
+        LoginResult::SecondaryAuthUnsupported => return Err(FlowError::SecondaryAuthUnsupported),
     };
     terminal.notice("[auth] trusted-device verification required; requesting one code push")?;
     let requested = second_factor
@@ -261,6 +271,18 @@ pub async fn run_login<L: LoginStep, T: SecureTerminal>(
     })
 }
 
+// Match only this published constant, never format or retain the raw selector.
+// Provenance: SideStore/apple-private-apis, revision
+// 03beb1aa42991ccdad6214dee77e72282bef461f, icloud-auth/src/client.rs:498-504.
+// That client classifies it as SMS. This does not prove delivery or account state.
+fn classify_unsupported<L: LoginStep>(selector: &str) -> LoginResult<L> {
+    if selector == "secondaryAuth" {
+        LoginResult::SecondaryAuthUnsupported
+    } else {
+        LoginResult::Unsupported
+    }
+}
+
 // Production adapters ---------------------------------------------------------
 
 impl<'a, T: Transport, A: AnisetteProvider, E: Entropy> LoginStep for &'a Authenticator<T, A, E> {
@@ -276,6 +298,7 @@ impl<'a, T: Transport, A: AnisetteProvider, E: Entropy> LoginStep for &'a Authen
         Ok(match self.login(account, password).authenticate().await? {
             LoginOutcome::Authenticated(session) => LoginResult::Authenticated(session),
             LoginOutcome::SecondFactorRequired(stage) => LoginResult::SecondFactorRequired(stage),
+            LoginOutcome::Unsupported(step) => classify_unsupported(step.step().as_str()),
             _ => LoginResult::Unsupported,
         })
     }
@@ -350,7 +373,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Plan {
         NoSecondFactor,
-        Unsupported,
+        Unsupported(&'static str),
         FailAuthenticate,
         SecondFactor {
             request: bool,
@@ -389,7 +412,7 @@ mod tests {
             self.log.borrow_mut().push("authenticate");
             match self.plan {
                 Plan::NoSecondFactor => Ok(LoginResult::Authenticated("session")),
-                Plan::Unsupported => Ok(LoginResult::Unsupported),
+                Plan::Unsupported(selector) => Ok(classify_unsupported(selector)),
                 Plan::FailAuthenticate => Err(StepFailure("initial exchange failed")),
                 Plan::SecondFactor { .. } => {
                     Ok(LoginResult::SecondFactorRequired(FakeSecondFactor {
@@ -651,12 +674,92 @@ mod tests {
 
     #[test]
     fn an_unsupported_step_stops_without_guessing() {
-        let (result, events, _) = run(Plan::Unsupported, b"someone@example.com\npw\n");
+        let (result, events, _) = run(Plan::Unsupported("unknown"), b"someone@example.com\npw\n");
         assert!(matches!(result.unwrap_err(), FlowError::UnsupportedStep));
         assert_eq!(
             events,
             vec!["prompt-hidden", "prompt-hidden", "authenticate"]
         );
+    }
+
+    #[test]
+    fn recognized_secondary_auth_stops_without_further_requests() {
+        let (result, events, _) = run(
+            Plan::Unsupported("secondaryAuth"),
+            b"someone@example.com\npw\n",
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            FlowError::SecondaryAuthUnsupported
+        ));
+        assert_eq!(
+            events,
+            vec!["prompt-hidden", "prompt-hidden", "authenticate"]
+        );
+    }
+
+    #[test]
+    fn only_the_exact_known_selector_is_classified() {
+        for selector in [
+            "",
+            "SecondaryAuth",
+            "secondaryauth",
+            "secondaryAuth ",
+            " secondaryAuth",
+            "secondaryAuth\n",
+            "secondaryAuth-extra",
+            "secret-account@example.com",
+            "secondaryΑuth",
+            "PrivateSentinel",
+            "\x1b[31m",
+        ] {
+            assert!(matches!(
+                classify_unsupported::<FakeLogin>(selector),
+                LoginResult::Unsupported
+            ));
+        }
+        let long = "secret".repeat(1024);
+        assert!(matches!(
+            classify_unsupported::<FakeLogin>(&long),
+            LoginResult::Unsupported
+        ));
+    }
+
+    #[test]
+    fn unsupported_diagnostics_are_fixed_and_do_not_echo_selectors() {
+        for (selector, expected) in [
+            (
+                "secondaryAuth",
+                "the server selected secondaryAuth; this flow is unsupported; stopped",
+            ),
+            (
+                "PrivateSentinel",
+                "the server requires a step other than a trusted-device code; stopped",
+            ),
+            (
+                "secret-account@example.com",
+                "the server requires a step other than a trusted-device code; stopped",
+            ),
+        ] {
+            let (result, events, _) =
+                run(Plan::Unsupported(selector), b"someone@example.com\npw\n");
+            let error = result.unwrap_err();
+            if selector != "secondaryAuth" {
+                assert!(!error.to_string().contains(selector));
+                assert!(!format!("{error:?}").contains(selector));
+            }
+            let production_error: FlowError<AuthError> = match error {
+                FlowError::SecondaryAuthUnsupported => FlowError::SecondaryAuthUnsupported,
+                FlowError::UnsupportedStep => FlowError::UnsupportedStep,
+                _ => panic!("unexpected synthetic flow outcome"),
+            };
+            let harness = crate::harness::HarnessError::Flow(production_error);
+            assert_eq!(harness.labels(), ("secondary authentication", expected));
+            assert_eq!(
+                events,
+                vec!["prompt-hidden", "prompt-hidden", "authenticate"]
+            );
+        }
     }
 
     #[test]
